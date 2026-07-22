@@ -135,8 +135,8 @@ class TelegramAPI:
                     "Подключите Яндекс Метрику — бот покажет причины изменений: "
                     "источники, посадочные страницы и бизнес-цели. Ежедневные или "
                     "еженедельные отчёты в выбранное время. Доступ только на чтение. "
-                    "PrivateSEO: https://private-seo.ru · Код: "
-                    "https://github.com/eduardtr95/privateseo-metrika-bot"
+                    "PrivateSEO: https://private-seo.ru/?utm_source=telegram&utm_medium=bot&utm_campaign=metrika_bot&utm_content=profile "
+                    "· Связь: @eduardtr95 · Код: https://github.com/eduardtr95/privateseo-metrika-bot"
                 )
             },
         )
@@ -199,6 +199,7 @@ class TelegramAPI:
             {"command": "schedule", "description": "Настроить расписание"},
             {"command": "pause", "description": "Остановить автодайджест"},
             {"command": "resume", "description": "Возобновить автодайджест"},
+            {"command": "feedback", "description": "Сообщить об ошибке или предложить идею"},
             {"command": "help", "description": "Как пользоваться"},
         ]
         self.call("setMyCommands", {"commands": commands})

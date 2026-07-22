@@ -18,7 +18,7 @@ Open-source Telegram-бот, который превращает данные Я
 
 ## Другие продукты PrivateSEO
 
-- [PrivateSEO](https://private-seo.ru/) — SEO- и GEO-продвижение с отчётностью по заявкам и деньгам;
+- [PrivateSEO](https://private-seo.ru/?utm_source=github&utm_medium=referral&utm_campaign=metrika_bot&utm_content=readme_products) — SEO- и GEO-продвижение с отчётностью по заявкам и деньгам;
 - [PrivateSEO AI Auditor](https://chromewebstore.google.com/detail/privateseo-ai-auditor-seo/nblbceehggefmhkioijdbppdboimoicg) — бесплатный аудит страницы и проверка доступа AI-ботов в Chrome;
 - [мониторинг сайтов](https://t.me/private_seo_monitor_bot) — уведомления о падениях, SSL, noindex и robots.txt.
 
@@ -37,6 +37,10 @@ Open-source Telegram-бот, который превращает данные Я
 - ежедневный отчёт сравнивает вчера с позавчера, недельный — два полных семидневных периода;
 - `/disconnect` и `/delete_me` для удаления доступа и данных;
 - никакие сырые данные Метрики и тексты отчётов не сохраняются.
+
+## Обратная связь
+
+Нашли ошибку, заметили неточность или хотите предложить функцию? Напишите автору в Telegram: [@eduardtr95](https://t.me/eduardtr95). Живые замечания пользователей помогают решить, что улучшать следующим.
 
 Пример сообщения:
 
@@ -106,6 +110,7 @@ curl http://127.0.0.1:8080/health
 | `/disconnect` | удалить OAuth-доступ |
 | `/delete_me` | удалить все данные пользователя |
 | `/privacy` | показать правила хранения данных |
+| `/feedback` | написать об ошибке или предложить улучшение |
 
 ## Как бот принимает решения
 
@@ -134,4 +139,4 @@ curl http://127.0.0.1:8080/health
 
 ## Лицензия
 
-[MIT](LICENSE). Автор — [Эдуард Трубченинов](https://github.com/eduardtr95), основатель [PrivateSEO](https://private-seo.ru/).
+[MIT](LICENSE). Автор — [Эдуард Трубченинов](https://github.com/eduardtr95), основатель [PrivateSEO](https://private-seo.ru/?utm_source=github&utm_medium=referral&utm_campaign=metrika_bot&utm_content=readme_author).

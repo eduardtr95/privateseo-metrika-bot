@@ -18,5 +18,6 @@ def test_profile_texts_update_name_short_and_full_description(monkeypatch):
         "setMyDescription",
     ]
     description = calls[-1][1]["description"]
-    assert "https://private-seo.ru" in description
+    assert "utm_source=telegram" in description
+    assert "@eduardtr95" in description
     assert "github.com/eduardtr95/privateseo-metrika-bot" in description

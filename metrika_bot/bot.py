@@ -131,6 +131,8 @@ class BotService:
                 chat_id,
                 "<b>Приватность</b>\n\nБот хранит Telegram chat ID, выбранный счётчик, цели и зашифрованные OAuth-токены. Сырые данные Метрики и отчёты не сохраняются. /disconnect удаляет доступ, /delete_me — все ваши данные.",
             )
+        elif command == "/feedback":
+            self._feedback(chat_id)
         elif command == "/help" or not command:
             self._help(chat_id)
         else:
@@ -159,11 +161,17 @@ class BotService:
     def _help(self, chat_id: int) -> None:
         self.telegram.send_message(
             chat_id,
-            "<b>Как пользоваться</b>\n\n/week — отчёт сейчас\n/counters — выбрать сайт\n/goals — выбрать заявки и продажи\n/schedule — дни и время отчётов\n/pause — выключить автодайджест\n/resume — включить обратно\n/disconnect — удалить доступ к Метрике\n/privacy — какие данные хранятся\n\n<b>Другие продукты PrivateSEO</b>\n"
-            '🌐 <a href="https://private-seo.ru/">Сайт SEO- и GEO-агентства</a>\n'
+            "<b>Как пользоваться</b>\n\n/week — отчёт сейчас\n/counters — выбрать сайт\n/goals — выбрать заявки и продажи\n/schedule — дни и время отчётов\n/pause — выключить автодайджест\n/resume — включить обратно\n/disconnect — удалить доступ к Метрике\n/privacy — какие данные хранятся\n/feedback — вопросы и предложения\n\n<b>Обратная связь</b>\nНашли ошибку, чего-то не хватает или есть идея? Напишите Эдуарду: <a href="https://t.me/eduardtr95">@eduardtr95</a>.\n\n<b>Другие продукты PrivateSEO</b>\n"
+            '🌐 <a href="https://private-seo.ru/?utm_source=telegram&amp;utm_medium=bot&amp;utm_campaign=metrika_bot&amp;utm_content=help">Сайт SEO- и GEO-агентства</a>\n'
             '🧩 <a href="https://chromewebstore.google.com/detail/privateseo-ai-auditor-seo/nblbceehggefmhkioijdbppdboimoicg">PrivateSEO AI Auditor для Chrome</a>\n'
             "🟢 Следить за падениями, SSL, noindex и robots.txt: "
             f'<a href="{html.escape(self.config.monitor_bot_url, quote=True)}">мониторинг сайтов</a>.',
+        )
+
+    def _feedback(self, chat_id: int) -> None:
+        self.telegram.send_message(
+            chat_id,
+            '<b>Вопросы и предложения</b>\n\nНашли ошибку, заметили неточность или хотите предложить функцию? Напишите автору бота — Эдуарду: <a href="https://t.me/eduardtr95">@eduardtr95</a>.',
         )
 
     def send_schedule(self, chat_id: int, message_id: int | None = None) -> None:
