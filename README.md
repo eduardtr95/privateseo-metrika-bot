@@ -16,6 +16,12 @@ Open-source Telegram-бот, который превращает данные Я
 
 Репозиторий открыт для прозрачности и независимости: можно проверить, как бот работает с данными, предложить улучшение или развернуть собственную копию. Большинству пользователей это не понадобится.
 
+## Другие продукты PrivateSEO
+
+- [PrivateSEO](https://private-seo.ru/) — SEO- и GEO-продвижение с отчётностью по заявкам и деньгам;
+- [PrivateSEO AI Auditor](https://chromewebstore.google.com/detail/privateseo-ai-auditor-seo/nblbceehggefmhkioijdbppdboimoicg) — бесплатный аудит страницы и проверка доступа AI-ботов в Chrome;
+- [мониторинг сайтов](https://t.me/private_seo_monitor_bot) — уведомления о падениях, SSL, noindex и robots.txt.
+
 ## Что уже работает
 
 - OAuth 2.0 Authorization Code + PKCE, доступ только `metrika:read`;

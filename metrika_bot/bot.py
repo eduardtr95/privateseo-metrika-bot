@@ -142,7 +142,7 @@ class BotService:
         if connection:
             self.telegram.send_message(
                 chat_id,
-                "<b>PrivateSEO Аналитика</b>\n\nМетрика подключена. Я показываю не просто цифры, а существенные изменения: где просел трафик, какие страницы дали рост и что проверить.\n\nОтчёт приходит по понедельникам в 09:00 МСК.",
+                "<b>PrivateSEO Аналитика</b>\n\nМетрика подключена. Я показываю не просто цифры, а существенные изменения: где просел трафик, какие страницы дали рост и что проверить.\n\nЕжедневное или недельное расписание настраивается под вас.",
                 [
                     [{"text": "Показать неделю", "callback_data": "week"}],
                     [{"text": "Настроить расписание", "callback_data": "schedule"}],
@@ -153,14 +153,17 @@ class BotService:
         url = self.yandex.authorization_url(chat_id)
         self.telegram.send_message(
             chat_id,
-            "<b>PrivateSEO Аналитика</b>\n\nПодключите Яндекс Метрику — бот раз в неделю объяснит:\n• что изменилось;\n• какой источник или страница повлияли;\n• что стоит проверить.\n\nДоступ только на чтение. Токен хранится зашифрованно, отключить его можно в любой момент.",
+            "<b>PrivateSEO Аналитика</b>\n\nПодключите Яндекс Метрику — бот по вашему расписанию объяснит:\n• что изменилось;\n• какой источник или страница повлияли;\n• что стоит проверить.\n\nДоступ только на чтение. Токен хранится зашифрованно, отключить его можно в любой момент.",
             [[{"text": "Подключить Метрику", "url": url}]],
         )
 
     def _help(self, chat_id: int) -> None:
         self.telegram.send_message(
             chat_id,
-            "<b>Как пользоваться</b>\n\n/week — отчёт сейчас\n/counters — выбрать сайт\n/goals — выбрать заявки и продажи\n/schedule — дни и время отчётов\n/pause — выключить автодайджест\n/resume — включить обратно\n/disconnect — удалить доступ к Метрике\n/privacy — какие данные хранятся\n\n<b>Другой инструмент PrivateSEO</b>\nСледить за падениями, SSL, noindex и robots.txt: "
+            "<b>Как пользоваться</b>\n\n/week — отчёт сейчас\n/counters — выбрать сайт\n/goals — выбрать заявки и продажи\n/schedule — дни и время отчётов\n/pause — выключить автодайджест\n/resume — включить обратно\n/disconnect — удалить доступ к Метрике\n/privacy — какие данные хранятся\n\n<b>Другие продукты PrivateSEO</b>\n"
+            '🌐 <a href="https://private-seo.ru/">Сайт SEO- и GEO-агентства</a>\n'
+            '🧩 <a href="https://chromewebstore.google.com/detail/privateseo-ai-auditor-seo/nblbceehggefmhkioijdbppdboimoicg">PrivateSEO AI Auditor для Chrome</a>\n'
+            "🟢 Следить за падениями, SSL, noindex и robots.txt: "
             f'<a href="{html.escape(self.config.monitor_bot_url, quote=True)}">мониторинг сайтов</a>.',
         )
 
