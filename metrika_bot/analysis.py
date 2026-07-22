@@ -252,12 +252,12 @@ def _signed_percent(value: float | None) -> str:
 
 
 def _mover_line(item: BreakdownChange, label: str, link: str | None = None) -> str:
-    arrow = "🔺" if item.delta > 0 else "🔻" if item.delta < 0 else "•"
+    marker = "🟢" if item.delta > 0 else "🔴" if item.delta < 0 else "⚪️"
     safe_label = html.escape(label)
     if link:
         safe_label = f'<a href="{html.escape(link, quote=True)}">{safe_label}</a>'
     return (
-        f"{arrow} {safe_label}: {_number(item.current)} ← {_number(item.previous)}"
+        f"{marker} {safe_label}: {_number(item.current)} ← {_number(item.previous)}"
         f" · {_signed(item.delta)} ({_signed_percent(item.percent)})"
     )
 
@@ -348,34 +348,7 @@ def _summary(data: ReportData) -> list[str]:
     else:
         first = f"Визитов столько же: <b>{_number(visits.current)}</b>."
 
-    losses = sorted((item for item in data.sources if item.delta < 0), key=lambda item: item.delta)
-    gains = sorted(
-        (item for item in data.sources if item.delta > 0), key=lambda item: item.delta, reverse=True
-    )
-    second = ""
-    if losses and _important(losses[0]):
-        lead = losses[0]
-        second = (
-            f"Главное: <b>{html.escape(source_name(lead.name))}</b> потерял "
-            f"{_number(abs(lead.delta))} визитов"
-        )
-        offsets = [item for item in gains if abs(item.delta) >= 3][:2]
-        if offsets:
-            rendered = " и ".join(
-                f"{html.escape(source_name(item.name))} ({_signed(item.delta)})" for item in offsets
-            )
-            second += f", часть падения скрыли {rendered}."
-        else:
-            second += "."
-    elif gains and _important(gains[0]):
-        lead = gains[0]
-        second = (
-            f"Главный вклад в рост — <b>{html.escape(source_name(lead.name))}</b>: "
-            f"{_signed(lead.delta)} визитов."
-        )
-    else:
-        second = "Внутри источников резких сдвигов не видно."
-    return [first, second]
+    return [first]
 
 
 def format_report(data: ReportData, monitor_bot_url: str | None = None) -> str:
@@ -392,21 +365,29 @@ def format_report(data: ReportData, monitor_bot_url: str | None = None) -> str:
     source_movers = sorted(data.sources, key=lambda item: abs(item.delta), reverse=True)
     source_movers = [item for item in source_movers if abs(item.delta) >= 3][:4]
     if source_movers:
-        lines.extend(["", "<b>Откуда пришло изменение</b>"])
+        lines.extend(["", "<b>Почему изменился итог</b>"])
         lines.extend(_mover_line(item, source_name(item.name)) for item in source_movers)
 
     page_losses = sorted(
-        (item for item in data.pages if item.delta <= -3), key=lambda item: item.delta
-    )[:2]
+        (item for item in data.pages if item.delta < 0 and _important(item)),
+        key=lambda item: item.delta,
+    )[:3]
     page_gains = sorted(
-        (item for item in data.pages if item.delta >= 3), key=lambda item: item.delta, reverse=True
-    )[:2]
+        (item for item in data.pages if item.delta > 0 and _important(item)),
+        key=lambda item: item.delta,
+        reverse=True,
+    )[:3]
     if page_losses:
-        lines.extend(["", "<b>Где потеряли</b>"])
+        lines.extend(["", "<b>Посадочные страницы: наибольшие потери</b>"])
         lines.extend(_mover_line(item, _page_label(item.name), item.name) for item in page_losses)
     if page_gains:
-        lines.extend(["", "<b>Где выросли</b>"])
+        lines.extend(["", "<b>Посадочные страницы: наибольший рост</b>"])
         lines.extend(_mover_line(item, _page_label(item.name), item.name) for item in page_gains)
+    if page_losses or page_gains:
+        lines.append(
+            "<i>До 3 страниц в каждом блоке: изменение от 3 визитов и от 20%. "
+            "Сравниваются до 500 самых посещаемых страниц каждого периода.</i>"
+        )
 
     lines.extend(["", "<b>Бизнес-действия</b>"])
     selected_business = [name for name in data.goal_names if goal_relevance(name) > 0]

@@ -111,9 +111,11 @@ def test_real_report_explains_hidden_search_loss_and_bad_goal():
         ],
     )
     text = format_report(data)
-    assert "Поиск</b> потерял 20 визитов" in text
-    assert "Ссылки с сайтов (+10)" in text
-    assert "Поиск: 36 ← 56 · −20 (−36%)" in text
-    assert "Где потеряли" in text and "Где выросли" in text
+    assert "🔴 Поиск: 36 ← 56 · −20 (−36%)" in text
+    assert "🟢 Ссылки с сайтов: 16 ← 6 · +10 (+167%)" in text
+    assert "Посадочные страницы: наибольшие потери" in text
+    assert "Посадочные страницы: наибольший рост" in text
+    assert "До 3 страниц в каждом блоке" in text
+    assert "до 500 самых посещаемых страниц" in text
     assert "Переход в YouTube" in text and "это не заявка" in text
     assert "Существенных изменений" not in text
