@@ -1,0 +1,22 @@
+[Unit]
+Description=PrivateSEO Yandex Metrica Telegram analyst
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=metrikabot
+Group=metrikabot
+WorkingDirectory=/opt/privateseo-metrika-bot
+EnvironmentFile=/etc/privateseo-metrika-bot.env
+ExecStart=/opt/privateseo-metrika-bot/.venv/bin/metrika-bot
+Restart=always
+RestartSec=5
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=true
+ReadWritePaths=/var/lib/privateseo-metrika-bot
+
+[Install]
+WantedBy=multi-user.target
