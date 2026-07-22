@@ -12,6 +12,7 @@ EnvironmentFile=/etc/privateseo-metrika-bot.env
 ExecStart=/opt/privateseo-metrika-bot/.venv/bin/metrika-bot
 Restart=always
 RestartSec=5
+UMask=0077
 NoNewPrivileges=true
 PrivateTmp=true
 ProtectSystem=strict
