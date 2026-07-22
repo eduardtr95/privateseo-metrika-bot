@@ -121,6 +121,18 @@ class TelegramAPI:
                 )
             },
         )
+        self.call(
+            "setMyDescription",
+            {
+                "description": (
+                    "Подключите Яндекс Метрику — бот покажет причины изменений: "
+                    "источники, посадочные страницы и бизнес-цели. Ежедневные или "
+                    "еженедельные отчёты в выбранное время. Доступ только на чтение. "
+                    "Open source by PrivateSEO: "
+                    "github.com/eduardtr95/privateseo-metrika-bot"
+                )
+            },
+        )
 
     def set_profile_photo(self, path: Path) -> None:
         boundary = "----PrivateSEOBot" + secrets.token_hex(12)
@@ -162,18 +174,6 @@ class TelegramAPI:
             raise TelegramAPIError("Telegram API unavailable") from None
         if not payload.get("ok"):
             raise TelegramAPIError(str(payload.get("description") or "Telegram API error"))
-        self.call(
-            "setMyDescription",
-            {
-                "description": (
-                    "Подключите Яндекс Метрику — бот покажет причины изменений: "
-                    "источники, посадочные страницы и бизнес-цели. Ежедневные или "
-                    "еженедельные отчёты в выбранное время. Доступ только на чтение. "
-                    "Open source by PrivateSEO: "
-                    "github.com/eduardtr95/privateseo-metrika-bot"
-                )
-            },
-        )
 
     def answer_callback(self, callback_id: str, text: str | None = None) -> None:
         payload: dict[str, Any] = {"callback_query_id": callback_id}
