@@ -378,18 +378,21 @@ def _rich_change(change: Change) -> str:
     return f"{marker} {_signed(change.absolute)} · {_signed_percent(change.percent)}"
 
 
-def _rich_table(caption: str, rows: list[tuple[str, float, float, str]]) -> str:
+def _rich_table(
+    caption: str,
+    rows: list[tuple[str, float, float, str]],
+    label_header: str,
+) -> str:
     rendered = [
         f"<table bordered striped><caption>{html.escape(caption)}</caption>",
-        "<tr><th>Показатель</th><th>Было</th><th>Стало</th><th>Изменение</th></tr>",
+        f"<tr><th>{html.escape(label_header)}</th><th>Было → стало</th><th>Δ</th></tr>",
     ]
     for label, previous, current, change in rows:
         rendered.append(
             "<tr>"
             f"<td>{label}</td>"
-            f'<td align="right">{_number(previous)}</td>'
-            f'<td align="right">{_number(current)}</td>'
-            f'<td align="right">{html.escape(change)}</td>'
+            f'<td align="center">{_number(previous)} → {_number(current)}</td>'
+            f'<td align="center">{html.escape(change)}</td>'
             "</tr>"
         )
     rendered.append("</table>")
@@ -422,6 +425,7 @@ def format_rich_report(data: ReportData) -> str:
                     _rich_change(data.users),
                 ),
             ],
+            "Метрика",
         ),
     ]
 
@@ -438,6 +442,7 @@ def format_rich_report(data: ReportData) -> str:
                     )
                     for item in sources
                 ],
+                "Источник",
             )
         )
 
@@ -450,9 +455,11 @@ def format_rich_report(data: ReportData) -> str:
         return rows
 
     if page_losses:
-        blocks.append(_rich_table("Посадочные страницы · потери", page_rows(page_losses)))
+        blocks.append(
+            _rich_table("Посадочные страницы · потери", page_rows(page_losses), "Страница")
+        )
     if page_gains:
-        blocks.append(_rich_table("Посадочные страницы · рост", page_rows(page_gains)))
+        blocks.append(_rich_table("Посадочные страницы · рост", page_rows(page_gains), "Страница"))
     if page_losses or page_gains:
         blocks.append(
             "<footer>Показано до 3 страниц: ≥3 визитов и ≥20%, либо ≥10 визитов. "
@@ -466,7 +473,7 @@ def format_rich_report(data: ReportData) -> str:
             (html.escape(item.name), item.previous, item.current, _rich_delta(item))
             for item in data.goal_details[:5]
         ]
-        blocks.append(_rich_table("Бизнес-действия", goal_rows))
+        blocks.append(_rich_table("Бизнес-действия", goal_rows, "Цель"))
         if selected_auxiliary:
             names = ", ".join(f"«{name}»" for name in selected_auxiliary)
             blocks.append(
