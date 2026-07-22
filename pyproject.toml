@@ -1,0 +1,29 @@
+[build-system]
+requires = ["setuptools>=69"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "privateseo-metrika-bot"
+version = "0.1.0"
+description = "Open-source Telegram analyst for Yandex Metrica"
+readme = "README.md"
+requires-python = ">=3.11"
+license = { text = "MIT" }
+authors = [{ name = "Eduard Trubcheninov" }]
+dependencies = ["cryptography>=48.0.1,<49"]
+
+[project.optional-dependencies]
+dev = ["pytest>=8,<10", "ruff>=0.12,<1"]
+
+[project.scripts]
+metrika-bot = "metrika_bot.__main__:main"
+
+[tool.setuptools.packages.find]
+include = ["metrika_bot*"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+
+[tool.ruff]
+line-length = 100
+target-version = "py311"

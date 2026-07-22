@@ -1,0 +1,291 @@
+from __future__ import annotations
+
+import html
+import json
+import logging
+import threading
+import time
+from concurrent.futures import ThreadPoolExecutor
+from datetime import datetime
+from zoneinfo import ZoneInfo
+
+from .analysis import ReportBuilder, format_report
+from .config import Config
+from .db import Database
+from .telegram import TelegramAPI, TelegramAPIError
+from .yandex import YandexAPIError, YandexClient
+
+
+log = logging.getLogger(__name__)
+
+
+class BotService:
+    def __init__(
+        self,
+        config: Config,
+        db: Database,
+        telegram: TelegramAPI,
+        yandex: YandexClient,
+    ):
+        self.config = config
+        self.db = db
+        self.telegram = telegram
+        self.yandex = yandex
+        self.reports = ReportBuilder(yandex)
+        self.stop_event = threading.Event()
+        self.executor = ThreadPoolExecutor(max_workers=8, thread_name_prefix="bot-update")
+
+    def run_polling(self) -> None:
+        offset: int | None = None
+        try:
+            self.telegram.set_commands()
+        except TelegramAPIError:
+            log.exception("Could not set commands")
+        while not self.stop_event.is_set():
+            try:
+                updates = self.telegram.get_updates(offset)
+                for update in updates:
+                    offset = int(update["update_id"]) + 1
+                    self.executor.submit(self.handle_update, update)
+            except TelegramAPIError:
+                log.exception("Telegram polling failed")
+                self.stop_event.wait(5)
+
+    def handle_update(self, update: dict) -> None:
+        try:
+            if "message" in update:
+                self._handle_message(update["message"])
+            elif "callback_query" in update:
+                self._handle_callback(update["callback_query"])
+        except (YandexAPIError, TelegramAPIError) as exc:
+            chat_id = self._chat_id(update)
+            log.warning("Request failed for chat %s: %s", chat_id, exc)
+            if chat_id:
+                self.telegram.send_message(
+                    chat_id,
+                    "Не получилось получить данные: "
+                    + html.escape(str(exc))
+                    + "\n\nПопробуйте ещё раз чуть позже.",
+                )
+        except Exception:
+            log.exception("Unhandled update error")
+            chat_id = self._chat_id(update)
+            if chat_id:
+                try:
+                    self.telegram.send_message(
+                        chat_id, "Что-то пошло не так. Ошибка уже записана — попробуйте позже."
+                    )
+                except TelegramAPIError:
+                    pass
+
+    @staticmethod
+    def _chat_id(update: dict) -> int | None:
+        if "message" in update:
+            return update["message"].get("chat", {}).get("id")
+        return update.get("callback_query", {}).get("message", {}).get("chat", {}).get("id")
+
+    def _handle_message(self, message: dict) -> None:
+        chat_id = int(message["chat"]["id"])
+        if message["chat"].get("type") != "private":
+            self.telegram.send_message(
+                chat_id,
+                "Из-за доступа к Метрике бот работает только в личном чате. Откройте его профиль и нажмите Start.",
+            )
+            return
+        username = message.get("from", {}).get("username")
+        self.db.upsert_user(chat_id, username)
+        text = str(message.get("text") or "").strip()
+        command = text.split()[0].split("@")[0].lower() if text.startswith("/") else ""
+
+        if command in ("/start", "/connect"):
+            self._welcome(chat_id)
+        elif command == "/week":
+            self.send_report(chat_id)
+        elif command == "/counters":
+            self.send_counters(chat_id)
+        elif command == "/goals":
+            self.send_goals(chat_id)
+        elif command == "/pause":
+            self.db.toggle_reports(chat_id, False)
+            self.telegram.send_message(
+                chat_id,
+                "Автоматический понедельничный отчёт выключен. Команда /week продолжает работать.",
+            )
+        elif command == "/resume":
+            self.db.toggle_reports(chat_id, True)
+            self.telegram.send_message(
+                chat_id, "Автоматический отчёт включён: по понедельникам в 09:00 МСК."
+            )
+        elif command == "/disconnect":
+            self.db.disconnect(chat_id)
+            self.telegram.send_message(
+                chat_id,
+                "Доступ к Метрике удалён из бота. В Яндекс ID его также можно отозвать в разделе доступов.",
+            )
+        elif command == "/delete_me":
+            self.db.delete_user(chat_id)
+            self.telegram.send_message(chat_id, "Ваши настройки и OAuth-токены полностью удалены.")
+        elif command == "/privacy":
+            self.telegram.send_message(
+                chat_id,
+                "<b>Приватность</b>\n\nБот хранит Telegram chat ID, выбранный счётчик, цели и зашифрованные OAuth-токены. Сырые данные Метрики и отчёты не сохраняются. /disconnect удаляет доступ, /delete_me — все ваши данные.",
+            )
+        elif command == "/help" or not command:
+            self._help(chat_id)
+        else:
+            self._help(chat_id)
+
+    def _welcome(self, chat_id: int) -> None:
+        connection = self.db.get_connection(chat_id)
+        if connection:
+            self.telegram.send_message(
+                chat_id,
+                "<b>PrivateSEO Аналитика</b>\n\nМетрика подключена. Я показываю не просто цифры, а существенные изменения: где просел трафик, какие страницы дали рост и что проверить.\n\nОтчёт приходит по понедельникам в 09:00 МСК.",
+                [
+                    [{"text": "Показать неделю", "callback_data": "week"}],
+                    [{"text": "Выбрать счётчик", "callback_data": "counters"}],
+                ],
+            )
+            return
+        url = self.yandex.authorization_url(chat_id)
+        self.telegram.send_message(
+            chat_id,
+            "<b>PrivateSEO Аналитика</b>\n\nПодключите Яндекс Метрику — бот раз в неделю объяснит:\n• что изменилось;\n• какой источник или страница повлияли;\n• что стоит проверить.\n\nДоступ только на чтение. Токен хранится зашифрованно, отключить его можно в любой момент.",
+            [[{"text": "Подключить Метрику", "url": url}]],
+        )
+
+    def _help(self, chat_id: int) -> None:
+        self.telegram.send_message(
+            chat_id,
+            "<b>Как пользоваться</b>\n\n/week — отчёт сейчас\n/counters — выбрать сайт\n/goals — выбрать заявки и продажи\n/pause — выключить автодайджест\n/resume — включить обратно\n/disconnect — удалить доступ к Метрике\n/privacy — какие данные хранятся\n\n<b>Другой инструмент PrivateSEO</b>\nСледить за падениями, SSL, noindex и robots.txt: "
+            f'<a href="{html.escape(self.config.monitor_bot_url, quote=True)}">мониторинг сайтов</a>.',
+        )
+
+    def send_counters(self, chat_id: int) -> None:
+        counters = self.yandex.counters(chat_id)
+        if not counters:
+            self.telegram.send_message(
+                chat_id, "В подключённом аккаунте нет доступных счётчиков Метрики."
+            )
+            return
+        buttons = []
+        for counter in counters[:40]:
+            name = str(counter.get("name") or counter.get("site") or counter["id"])
+            buttons.append([{"text": name[:50], "callback_data": f"counter:{counter['id']}"}])
+        self.telegram.send_message(chat_id, "Выберите сайт, по которому нужен отчёт:", buttons)
+
+    def send_goals(self, chat_id: int) -> None:
+        connection = self.db.get_connection(chat_id)
+        if not connection or not connection["counter_id"]:
+            self.telegram.send_message(chat_id, "Сначала выберите счётчик: /counters")
+            return
+        goals = self.yandex.goals(chat_id, int(connection["counter_id"]))
+        selected = set(json.loads(connection["goal_ids"] or "[]"))
+        if not goals:
+            self.telegram.send_message(chat_id, "В этом счётчике пока нет целей.")
+            return
+        buttons = []
+        for goal in goals[:40]:
+            goal_id = int(goal["id"])
+            mark = "✅" if goal_id in selected else "▫️"
+            name = str(goal.get("name") or goal_id)
+            buttons.append([{"text": f"{mark} {name}"[:55], "callback_data": f"goal:{goal_id}"}])
+        buttons.append([{"text": "Готово — показать отчёт", "callback_data": "week"}])
+        self.telegram.send_message(
+            chat_id,
+            "Выберите только бизнес-цели: заявки, звонки, покупки. Повторное нажатие снимает выбор. Максимум — 15 целей.",
+            buttons,
+        )
+
+    def send_report(self, chat_id: int) -> None:
+        connection = self.db.get_connection(chat_id)
+        if not connection:
+            self._welcome(chat_id)
+            return
+        if not connection["counter_id"]:
+            self.send_counters(chat_id)
+            return
+        self.telegram.send_message(chat_id, "Собираю отчёт — обычно это занимает несколько секунд…")
+        data = self.reports.collect(chat_id, connection)
+        self.telegram.send_message(
+            chat_id,
+            format_report(data),
+            [
+                [{"text": "Настроить цели", "callback_data": "goals"}],
+                [{"text": "Другой счётчик", "callback_data": "counters"}],
+            ],
+        )
+        self.db.event(chat_id, "report_manual", str(connection["counter_id"]))
+
+    def _handle_callback(self, callback: dict) -> None:
+        callback_id = str(callback["id"])
+        chat_id = int(callback["message"]["chat"]["id"])
+        if callback["message"]["chat"].get("type") != "private":
+            self.telegram.answer_callback(callback_id, "Настройки доступны только в личном чате")
+            return
+        username = callback.get("from", {}).get("username")
+        self.db.upsert_user(chat_id, username)
+        data = str(callback.get("data") or "")
+        self.telegram.answer_callback(callback_id)
+
+        if data == "week":
+            self.send_report(chat_id)
+        elif data == "counters":
+            self.send_counters(chat_id)
+        elif data == "goals":
+            self.send_goals(chat_id)
+        elif data.startswith("counter:"):
+            counter_id = int(data.split(":", 1)[1])
+            counters = self.yandex.counters(chat_id)
+            match = next((item for item in counters if int(item["id"]) == counter_id), None)
+            if not match:
+                raise YandexAPIError("Счётчик больше не доступен")
+            name = str(match.get("name") or match.get("site") or counter_id)
+            self.db.select_counter(chat_id, counter_id, name)
+            self.db.event(chat_id, "counter_selected", str(counter_id))
+            self.telegram.send_message(chat_id, f"Выбран счётчик: <b>{html.escape(name)}</b>")
+            self.send_goals(chat_id)
+        elif data.startswith("goal:"):
+            goal_id = int(data.split(":", 1)[1])
+            connection = self.db.get_connection(chat_id)
+            if not connection:
+                self._welcome(chat_id)
+                return
+            selected = set(json.loads(connection["goal_ids"] or "[]"))
+            if goal_id in selected:
+                selected.remove(goal_id)
+                response = "Цель убрана"
+            elif len(selected) >= 15:
+                self.telegram.answer_callback(callback_id, "Можно выбрать не больше 15 целей")
+                return
+            else:
+                selected.add(goal_id)
+                response = "Цель добавлена"
+            self.db.set_goals(chat_id, list(selected))
+            self.telegram.send_message(
+                chat_id, response + ". /goals — продолжить настройку, /week — отчёт."
+            )
+
+    def run_scheduler(self) -> None:
+        timezone = ZoneInfo(self.config.report_timezone)
+        while not self.stop_event.is_set():
+            now = datetime.now(timezone)
+            if now.weekday() == self.config.report_weekday and now.hour >= self.config.report_hour:
+                report_key = f"{now.isocalendar().year}-W{now.isocalendar().week:02d}"
+                for row in self.db.due_users(report_key):
+                    if self.stop_event.is_set():
+                        break
+                    chat_id = int(row["chat_id"])
+                    try:
+                        data = self.reports.collect(chat_id, row, today=now.date())
+                        self.telegram.send_message(chat_id, format_report(data))
+                        self.db.mark_report_sent(chat_id, report_key)
+                        self.db.event(chat_id, "report_scheduled", report_key)
+                    except Exception:
+                        log.exception("Scheduled report failed for chat %s", chat_id)
+                    time.sleep(1)
+            self.stop_event.wait(60)
+
+    def stop(self) -> None:
+        self.stop_event.set()
+        self.executor.shutdown(wait=False, cancel_futures=True)
