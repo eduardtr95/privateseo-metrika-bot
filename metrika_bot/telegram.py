@@ -91,6 +91,46 @@ class TelegramAPI:
             },
         )
 
+    def edit_message_text(
+        self,
+        chat_id: int,
+        message_id: int,
+        text: str,
+        buttons: list[list[dict[str, str]]],
+    ) -> None:
+        self.call(
+            "editMessageText",
+            {
+                "chat_id": chat_id,
+                "message_id": message_id,
+                "text": text,
+                "parse_mode": "HTML",
+                "reply_markup": {"inline_keyboard": buttons},
+            },
+        )
+
+    def set_profile_texts(self) -> None:
+        self.call("setMyName", {"name": "PrivateSEO Аналитика"})
+        self.call(
+            "setMyShortDescription",
+            {
+                "short_description": (
+                    "Понятные отчёты Яндекс Метрики: что изменилось, почему и что проверить."
+                )
+            },
+        )
+        self.call(
+            "setMyDescription",
+            {
+                "description": (
+                    "Подключите Яндекс Метрику — бот покажет причины изменений: "
+                    "источники, посадочные страницы и бизнес-цели. Ежедневные или "
+                    "еженедельные отчёты в выбранное время. Доступ только на чтение. "
+                    "Open source by PrivateSEO."
+                )
+            },
+        )
+
     def answer_callback(self, callback_id: str, text: str | None = None) -> None:
         payload: dict[str, Any] = {"callback_query_id": callback_id}
         if text:
@@ -105,6 +145,7 @@ class TelegramAPI:
             {"command": "week", "description": "Отчёт за последние 7 дней"},
             {"command": "counters", "description": "Выбрать счётчик"},
             {"command": "goals", "description": "Выбрать цели и заявки"},
+            {"command": "schedule", "description": "Настроить расписание"},
             {"command": "pause", "description": "Остановить автодайджест"},
             {"command": "resume", "description": "Возобновить автодайджест"},
             {"command": "help", "description": "Как пользоваться"},

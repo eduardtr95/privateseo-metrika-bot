@@ -5,6 +5,7 @@ from metrika_bot.analysis import (
     Change,
     Period,
     ReportData,
+    completed_periods,
     completed_weeks,
     format_report,
     format_rich_report,
@@ -34,6 +35,16 @@ def test_completed_weeks_uses_last_completed_day():
     current, previous = completed_weeks(date(2026, 7, 22))
     assert (current.start, current.end) == (date(2026, 7, 15), date(2026, 7, 21))
     assert (previous.start, previous.end) == (date(2026, 7, 8), date(2026, 7, 14))
+
+
+def test_daily_period_compares_yesterday_with_day_before():
+    current, previous = completed_periods(1, date(2026, 7, 22))
+    assert (current.start, current.end) == (date(2026, 7, 21), date(2026, 7, 21))
+    assert (previous.start, previous.end) == (date(2026, 7, 20), date(2026, 7, 20))
+    data = report(current_period=current, previous_period=previous)
+    text = format_rich_report(data)
+    assert "Итог дня" in text
+    assert "21.07.2026 против предыдущего дня" in text
 
 
 def test_report_points_to_largest_source_and_page_loss():

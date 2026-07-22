@@ -44,3 +44,24 @@ def test_toggle_goal_updates_selection_without_new_message(tmp_path: Path):
     assert db.toggle_goal(123, 7) == ([7], True)
     assert db.toggle_goal(123, 8) == ([7, 8], True)
     assert db.toggle_goal(123, 7) == ([8], False)
+
+
+def test_user_report_schedule_can_be_changed(tmp_path: Path):
+    db = Database(tmp_path / "bot.sqlite3")
+    db.upsert_user(123, "user")
+    db.save_tokens(123, "encrypted", None, None)
+    db.select_counter(123, 55, "example")
+    user = db.get_user(123)
+    assert (user["report_frequency"], user["report_weekday"], user["report_hour"]) == (
+        "weekly",
+        0,
+        9,
+    )
+    db.set_report_schedule(123, frequency="daily", hour=18, enabled=True)
+    user = db.get_user(123)
+    assert (user["report_frequency"], user["report_hour"], user["report_enabled"]) == (
+        "daily",
+        18,
+        1,
+    )
+    assert [row["chat_id"] for row in db.scheduled_users()] == [123]

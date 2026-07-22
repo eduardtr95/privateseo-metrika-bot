@@ -66,6 +66,17 @@ class Database:
                 );
                 """
             )
+            user_columns = {
+                str(row["name"]) for row in conn.execute("PRAGMA table_info(users)").fetchall()
+            }
+            migrations = {
+                "report_frequency": "TEXT NOT NULL DEFAULT 'weekly'",
+                "report_weekday": "INTEGER NOT NULL DEFAULT 0",
+                "report_hour": "INTEGER NOT NULL DEFAULT 9",
+            }
+            for name, definition in migrations.items():
+                if name not in user_columns:
+                    conn.execute(f"ALTER TABLE users ADD COLUMN {name} {definition}")
 
     @staticmethod
     def _now() -> str:
@@ -78,6 +89,10 @@ class Database:
                 ON CONFLICT(chat_id) DO UPDATE SET username = excluded.username""",
                 (chat_id, username, self._now()),
             )
+
+    def get_user(self, chat_id: int) -> sqlite3.Row | None:
+        with self.connect() as conn:
+            return conn.execute("SELECT * FROM users WHERE chat_id = ?", (chat_id,)).fetchone()
 
     def save_oauth_state(self, state: str, chat_id: int, verifier: str) -> None:
         expires = (datetime.now(UTC) + timedelta(minutes=10)).isoformat()
@@ -192,6 +207,50 @@ class Database:
             conn.execute(
                 "UPDATE users SET report_enabled = ? WHERE chat_id = ?", (int(enabled), chat_id)
             )
+
+    def set_report_schedule(
+        self,
+        chat_id: int,
+        *,
+        frequency: str | None = None,
+        weekday: int | None = None,
+        hour: int | None = None,
+        enabled: bool | None = None,
+    ) -> None:
+        fields: list[str] = []
+        values: list[object] = []
+        if frequency is not None:
+            if frequency not in {"daily", "weekly"}:
+                raise ValueError("Invalid report frequency")
+            fields.append("report_frequency = ?")
+            values.append(frequency)
+        if weekday is not None:
+            if weekday not in range(7):
+                raise ValueError("Invalid report weekday")
+            fields.append("report_weekday = ?")
+            values.append(weekday)
+        if hour is not None:
+            if hour not in range(24):
+                raise ValueError("Invalid report hour")
+            fields.append("report_hour = ?")
+            values.append(hour)
+        if enabled is not None:
+            fields.append("report_enabled = ?")
+            values.append(int(enabled))
+        if not fields:
+            return
+        values.append(chat_id)
+        with self.connect() as conn:
+            conn.execute(f"UPDATE users SET {', '.join(fields)} WHERE chat_id = ?", values)
+
+    def scheduled_users(self) -> list[sqlite3.Row]:
+        with self.connect() as conn:
+            return conn.execute(
+                """SELECT u.*, c.access_token, c.refresh_token, c.expires_at,
+                          c.counter_id, c.counter_name, c.goal_ids, c.connected_at
+                FROM users u JOIN connections c USING(chat_id)
+                WHERE u.report_enabled = 1 AND c.counter_id IS NOT NULL"""
+            ).fetchall()
 
     def due_users(self, report_key: str) -> list[sqlite3.Row]:
         with self.connect() as conn:

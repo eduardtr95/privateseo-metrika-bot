@@ -17,6 +17,7 @@ from .yandex import YandexAPIError, YandexClient
 
 
 log = logging.getLogger(__name__)
+WEEKDAYS = ("Пн", "Вт", "Ср", "Чт", "Пт", "Сб", "Вс")
 
 
 class BotService:
@@ -39,8 +40,9 @@ class BotService:
         offset: int | None = None
         try:
             self.telegram.set_commands()
+            self.telegram.set_profile_texts()
         except TelegramAPIError:
-            log.exception("Could not set commands")
+            log.exception("Could not update bot profile")
         while not self.stop_event.is_set():
             try:
                 updates = self.telegram.get_updates(offset)
@@ -105,17 +107,17 @@ class BotService:
             self.send_counters(chat_id)
         elif command == "/goals":
             self.send_goals(chat_id)
+        elif command == "/schedule":
+            self.send_schedule(chat_id)
         elif command == "/pause":
             self.db.toggle_reports(chat_id, False)
             self.telegram.send_message(
                 chat_id,
-                "Автоматический понедельничный отчёт выключен. Команда /week продолжает работать.",
+                "Автоматические отчёты выключены. Команда /week продолжает работать.",
             )
         elif command == "/resume":
             self.db.toggle_reports(chat_id, True)
-            self.telegram.send_message(
-                chat_id, "Автоматический отчёт включён: по понедельникам в 09:00 МСК."
-            )
+            self.send_schedule(chat_id)
         elif command == "/disconnect":
             self.db.disconnect(chat_id)
             self.telegram.send_message(
@@ -143,6 +145,7 @@ class BotService:
                 "<b>PrivateSEO Аналитика</b>\n\nМетрика подключена. Я показываю не просто цифры, а существенные изменения: где просел трафик, какие страницы дали рост и что проверить.\n\nОтчёт приходит по понедельникам в 09:00 МСК.",
                 [
                     [{"text": "Показать неделю", "callback_data": "week"}],
+                    [{"text": "Настроить расписание", "callback_data": "schedule"}],
                     [{"text": "Выбрать счётчик", "callback_data": "counters"}],
                 ],
             )
@@ -157,9 +160,70 @@ class BotService:
     def _help(self, chat_id: int) -> None:
         self.telegram.send_message(
             chat_id,
-            "<b>Как пользоваться</b>\n\n/week — отчёт сейчас\n/counters — выбрать сайт\n/goals — выбрать заявки и продажи\n/pause — выключить автодайджест\n/resume — включить обратно\n/disconnect — удалить доступ к Метрике\n/privacy — какие данные хранятся\n\n<b>Другой инструмент PrivateSEO</b>\nСледить за падениями, SSL, noindex и robots.txt: "
+            "<b>Как пользоваться</b>\n\n/week — отчёт сейчас\n/counters — выбрать сайт\n/goals — выбрать заявки и продажи\n/schedule — дни и время отчётов\n/pause — выключить автодайджест\n/resume — включить обратно\n/disconnect — удалить доступ к Метрике\n/privacy — какие данные хранятся\n\n<b>Другой инструмент PrivateSEO</b>\nСледить за падениями, SSL, noindex и robots.txt: "
             f'<a href="{html.escape(self.config.monitor_bot_url, quote=True)}">мониторинг сайтов</a>.',
         )
+
+    def send_schedule(self, chat_id: int, message_id: int | None = None) -> None:
+        user = self.db.get_user(chat_id)
+        if not user:
+            return
+        enabled = bool(user["report_enabled"])
+        frequency = str(user["report_frequency"] or "weekly")
+        weekday = int(user["report_weekday"])
+        hour = int(user["report_hour"])
+        if not enabled:
+            current = "Только вручную"
+        elif frequency == "daily":
+            current = f"Каждый день в {hour:02d}:00 МСК"
+        else:
+            current = f"Каждую {WEEKDAYS[weekday]} в {hour:02d}:00 МСК"
+        text = (
+            "<b>Расписание отчётов</b>\n\n"
+            f"Сейчас: <b>{current}</b>\n"
+            "Ежедневный отчёт сравнивает вчера с позавчера. "
+            "Еженедельный — последние 7 полных дней с предыдущими 7."
+        )
+        buttons = [
+            [
+                {
+                    "text": ("✅ " if enabled and frequency == "daily" else "") + "Каждый день",
+                    "callback_data": "schedule:frequency:daily",
+                },
+                {
+                    "text": ("✅ " if enabled and frequency == "weekly" else "") + "Раз в неделю",
+                    "callback_data": "schedule:frequency:weekly",
+                },
+            ],
+            [
+                {
+                    "text": ("✅ " if not enabled else "") + "Только вручную",
+                    "callback_data": "schedule:manual",
+                }
+            ],
+        ]
+        if frequency == "weekly":
+            buttons.append(
+                [
+                    {
+                        "text": ("✅" if day == weekday else "") + WEEKDAYS[day],
+                        "callback_data": f"schedule:weekday:{day}",
+                    }
+                    for day in range(7)
+                ]
+            )
+        buttons.append(
+            [
+                {"text": "◀ −1 час", "callback_data": "schedule:hour:-1"},
+                {"text": f"{hour:02d}:00 МСК", "callback_data": "schedule:noop"},
+                {"text": "+1 час ▶", "callback_data": "schedule:hour:1"},
+            ]
+        )
+        buttons.append([{"text": "Прислать отчёт сейчас", "callback_data": "week"}])
+        if message_id is None:
+            self.telegram.send_message(chat_id, text, buttons)
+        else:
+            self.telegram.edit_message_text(chat_id, message_id, text, buttons)
 
     def send_counters(self, chat_id: int) -> None:
         counters = self.yandex.counters(chat_id)
@@ -233,6 +297,7 @@ class BotService:
         if with_buttons:
             buttons = [
                 [{"text": "Настроить цели", "callback_data": "goals"}],
+                [{"text": "Расписание отчётов", "callback_data": "schedule"}],
                 [{"text": "Другой счётчик", "callback_data": "counters"}],
             ]
         try:
@@ -250,8 +315,10 @@ class BotService:
         username = callback.get("from", {}).get("username")
         self.db.upsert_user(chat_id, username)
         data = str(callback.get("data") or "")
-        goal_action = data.startswith("goal:") or data.startswith("goals:")
-        if not goal_action:
+        delayed_answer = (
+            data.startswith("goal:") or data.startswith("goals:") or data.startswith("schedule:")
+        )
+        if not delayed_answer:
             self.telegram.answer_callback(callback_id)
 
         if data == "week":
@@ -260,6 +327,25 @@ class BotService:
             self.send_counters(chat_id)
         elif data == "goals":
             self.send_goals(chat_id)
+        elif data == "schedule":
+            self.send_schedule(chat_id)
+        elif data.startswith("schedule:"):
+            parts = data.split(":")
+            if data == "schedule:noop":
+                self.telegram.answer_callback(callback_id)
+                return
+            if parts[1] == "frequency":
+                self.db.set_report_schedule(chat_id, frequency=parts[2], enabled=True)
+            elif parts[1] == "manual":
+                self.db.set_report_schedule(chat_id, enabled=False)
+            elif parts[1] == "weekday":
+                self.db.set_report_schedule(chat_id, weekday=int(parts[2]))
+            elif parts[1] == "hour":
+                user = self.db.get_user(chat_id)
+                hour = (int(user["report_hour"]) + int(parts[2])) % 24
+                self.db.set_report_schedule(chat_id, hour=hour)
+            self.send_schedule(chat_id, int(callback["message"]["message_id"]))
+            self.telegram.answer_callback(callback_id, "Расписание обновлено")
         elif data.startswith("counter:"):
             counter_id = int(data.split(":", 1)[1])
             counters = self.yandex.counters(chat_id)
@@ -333,20 +419,32 @@ class BotService:
         timezone = ZoneInfo(self.config.report_timezone)
         while not self.stop_event.is_set():
             now = datetime.now(timezone)
-            if now.weekday() == self.config.report_weekday and now.hour >= self.config.report_hour:
-                report_key = f"{now.isocalendar().year}-W{now.isocalendar().week:02d}"
-                for row in self.db.due_users(report_key):
-                    if self.stop_event.is_set():
-                        break
-                    chat_id = int(row["chat_id"])
-                    try:
-                        data = self.reports.collect(chat_id, row, today=now.date())
-                        self._send_formatted_report(chat_id, data)
-                        self.db.mark_report_sent(chat_id, report_key)
-                        self.db.event(chat_id, "report_scheduled", report_key)
-                    except Exception:
-                        log.exception("Scheduled report failed for chat %s", chat_id)
-                    time.sleep(1)
+            for row in self.db.scheduled_users():
+                if self.stop_event.is_set():
+                    break
+                frequency = str(row["report_frequency"] or "weekly")
+                scheduled_hour = int(row["report_hour"])
+                if now.hour < scheduled_hour:
+                    continue
+                if frequency == "daily":
+                    report_key = f"D-{now.date().isoformat()}"
+                    days = 1
+                else:
+                    if now.weekday() != int(row["report_weekday"]):
+                        continue
+                    report_key = f"W-{now.isocalendar().year}-{now.isocalendar().week:02d}"
+                    days = 7
+                if str(row["last_report_key"] or "") == report_key:
+                    continue
+                chat_id = int(row["chat_id"])
+                try:
+                    data = self.reports.collect(chat_id, row, today=now.date(), days=days)
+                    self._send_formatted_report(chat_id, data)
+                    self.db.mark_report_sent(chat_id, report_key)
+                    self.db.event(chat_id, "report_scheduled", report_key)
+                except Exception:
+                    log.exception("Scheduled report failed for chat %s", chat_id)
+                time.sleep(1)
             self.stop_event.wait(60)
 
     def stop(self) -> None:

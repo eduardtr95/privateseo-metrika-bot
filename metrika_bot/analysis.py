@@ -73,11 +73,17 @@ class ReportData:
 
 
 def completed_weeks(today: date | None = None) -> tuple[Period, Period]:
+    return completed_periods(7, today)
+
+
+def completed_periods(days: int, today: date | None = None) -> tuple[Period, Period]:
+    if days < 1:
+        raise ValueError("days must be positive")
     today = today or date.today()
     current_end = today - timedelta(days=1)
-    current = Period(current_end - timedelta(days=6), current_end)
+    current = Period(current_end - timedelta(days=days - 1), current_end)
     previous_end = current.start - timedelta(days=1)
-    previous = Period(previous_end - timedelta(days=6), previous_end)
+    previous = Period(previous_end - timedelta(days=days - 1), previous_end)
     return current, previous
 
 
@@ -111,7 +117,13 @@ class ReportBuilder:
     def __init__(self, yandex: YandexClient):
         self.yandex = yandex
 
-    def collect(self, chat_id: int, connection: Any, today: date | None = None) -> ReportData:
+    def collect(
+        self,
+        chat_id: int,
+        connection: Any,
+        today: date | None = None,
+        days: int = 7,
+    ) -> ReportData:
         counter_id = int(connection["counter_id"])
         goal_ids = [int(value) for value in json.loads(connection["goal_ids"] or "[]")]
         goals = self.yandex.goals(chat_id, counter_id)
@@ -120,7 +132,7 @@ class ReportBuilder:
         metrics = ["ym:s:visits", "ym:s:users"] + [
             f"ym:s:goal{goal_id}reaches" for goal_id in selected
         ]
-        current, previous = completed_weeks(today)
+        current, previous = completed_periods(days, today)
 
         cur_total = self.yandex.report(
             chat_id, counter_id, current.api_start, current.api_end, metrics
@@ -351,6 +363,19 @@ def _summary(data: ReportData) -> list[str]:
     return [first]
 
 
+def _period_word(data: ReportData) -> tuple[str, str, str]:
+    days = (data.current_period.end - data.current_period.start).days + 1
+    if days == 1:
+        return "день", "Итог дня", "против предыдущего дня"
+    return "неделю", "Итог недели", "против предыдущих 7 дней"
+
+
+def _period_text(period: Period) -> str:
+    if period.start == period.end:
+        return period.start.strftime("%d.%m.%Y")
+    return f"{period.start.strftime('%d.%m')}–{period.end.strftime('%d.%m.%Y')}"
+
+
 def _report_movers(
     data: ReportData,
 ) -> tuple[list[BreakdownChange], list[BreakdownChange], list[BreakdownChange]]:
@@ -402,15 +427,13 @@ def _rich_table(
 def format_rich_report(data: ReportData) -> str:
     """Telegram Bot API 10.2 native Rich Message with real tables."""
     period = data.current_period
+    _, total_caption, comparison = _period_word(data)
     sources, page_losses, page_gains = _report_movers(data)
     blocks = [
         f"<h2>{html.escape(data.counter_name)}</h2>",
-        (
-            f"<p>{period.start.strftime('%d.%m')}–{period.end.strftime('%d.%m.%Y')} "
-            "против предыдущих 7 дней</p>"
-        ),
+        (f"<p>{_period_text(period)} {comparison}</p>"),
         _rich_table(
-            "Итог недели",
+            total_caption,
             [
                 (
                     "Визиты",
@@ -502,9 +525,10 @@ def format_rich_report(data: ReportData) -> str:
 
 def format_report(data: ReportData, monitor_bot_url: str | None = None) -> str:
     period = data.current_period
+    period_word, _, comparison = _period_word(data)
     lines = [
-        f"<b>{html.escape(data.counter_name)}: что изменилось за неделю</b>",
-        f"{period.start.strftime('%d.%m')}–{period.end.strftime('%d.%m.%Y')} против предыдущих 7 дней",
+        f"<b>{html.escape(data.counter_name)}: что изменилось за {period_word}</b>",
+        f"{_period_text(period)} {comparison}",
         "",
         "<b>Итог</b>",
     ]
