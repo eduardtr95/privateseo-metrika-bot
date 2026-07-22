@@ -9,7 +9,7 @@ from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime
 from zoneinfo import ZoneInfo
 
-from .analysis import ReportBuilder, format_report
+from .analysis import ReportBuilder, format_report, goal_relevance
 from .config import Config
 from .db import Database
 from .telegram import TelegramAPI, TelegramAPIError
@@ -185,15 +185,25 @@ class BotService:
             self.telegram.send_message(chat_id, "В этом счётчике пока нет целей.")
             return
         buttons = []
+        goals = sorted(
+            goals,
+            key=lambda goal: (
+                -goal_relevance(str(goal.get("name") or "")),
+                str(goal.get("name") or "").casefold(),
+            ),
+        )
         for goal in goals[:40]:
             goal_id = int(goal["id"])
             mark = "✅" if goal_id in selected else "▫️"
             name = str(goal.get("name") or goal_id)
-            buttons.append([{"text": f"{mark} {name}"[:55], "callback_data": f"goal:{goal_id}"}])
+            recommended = "⭐ " if goal_relevance(name) > 0 else ""
+            buttons.append(
+                [{"text": f"{mark} {recommended}{name}"[:55], "callback_data": f"goal:{goal_id}"}]
+            )
         buttons.append([{"text": "Готово — показать отчёт", "callback_data": "week"}])
         self.telegram.send_message(
             chat_id,
-            "Выберите только бизнес-цели: заявки, звонки, покупки. Повторное нажатие снимает выбор. Максимум — 15 целей.",
+            "Выберите бизнес-действия: заявки, звонки, покупки и чат. ⭐ — рекомендуемые цели. Повторное нажатие снимает выбор.",
             buttons,
         )
 
@@ -242,8 +252,18 @@ class BotService:
                 raise YandexAPIError("Счётчик больше не доступен")
             name = str(match.get("name") or match.get("site") or counter_id)
             self.db.select_counter(chat_id, counter_id, name)
+            goals = self.yandex.goals(chat_id, counter_id)
+            recommended = [
+                int(goal["id"]) for goal in goals if goal_relevance(str(goal.get("name") or "")) > 0
+            ][:15]
+            self.db.set_goals(chat_id, recommended)
             self.db.event(chat_id, "counter_selected", str(counter_id))
             self.telegram.send_message(chat_id, f"Выбран счётчик: <b>{html.escape(name)}</b>")
+            if recommended:
+                self.telegram.send_message(
+                    chat_id,
+                    "Я заранее отметил цели, похожие на заявки и обращения. Проверьте список — выбор можно изменить.",
+                )
             self.send_goals(chat_id)
         elif data.startswith("goal:"):
             goal_id = int(data.split(":", 1)[1])

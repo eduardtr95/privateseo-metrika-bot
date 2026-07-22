@@ -5,6 +5,7 @@ import json
 from dataclasses import dataclass
 from datetime import date, timedelta
 from typing import Any
+from urllib.parse import urlparse
 
 from .yandex import YandexClient
 
@@ -49,6 +50,12 @@ class BreakdownChange:
     def delta(self) -> float:
         return self.current - self.previous
 
+    @property
+    def percent(self) -> float | None:
+        if self.previous == 0:
+            return None
+        return self.delta / self.previous * 100
+
 
 @dataclass
 class ReportData:
@@ -59,6 +66,7 @@ class ReportData:
     users: Change
     goals: Change | None
     goal_names: list[str]
+    goal_details: list[BreakdownChange]
     sources: list[BreakdownChange]
     pages: list[BreakdownChange]
     sampled: bool = False
@@ -123,6 +131,10 @@ class ReportBuilder:
         cur_values, prev_values = _totals(cur_total), _totals(prev_total)
         cur_goals = sum(cur_values[2:]) if selected else None
         prev_goals = sum(prev_values[2:]) if selected else None
+        goal_details = [
+            BreakdownChange(goal_map[goal_id], cur_values[index], prev_values[index])
+            for index, goal_id in enumerate(selected, start=2)
+        ]
 
         source_dimension = ["ym:s:trafficSource"]
         page_dimension = ["ym:s:startURL"]
@@ -172,6 +184,7 @@ class ReportBuilder:
             users=Change(cur_values[1], prev_values[1]),
             goals=Change(cur_goals, prev_goals) if cur_goals is not None else None,
             goal_names=[goal_map[goal_id] for goal_id in selected],
+            goal_details=goal_details,
             sources=compare_breakdowns(_breakdown(cur_sources), _breakdown(prev_sources)),
             pages=compare_breakdowns(_breakdown(cur_pages), _breakdown(prev_pages)),
             sampled=sampled,
@@ -195,6 +208,81 @@ def _short_page(value: str, limit: int = 58) -> str:
     return value if len(value) <= limit else value[: limit - 1] + "…"
 
 
+SOURCE_NAMES = {
+    "Переходы из поисковых систем": "Поиск",
+    "Переходы по ссылкам на сайтах": "Ссылки с сайтов",
+    "Прямые заходы": "Прямые заходы",
+    "Внутренние переходы": "Внутренние переходы",
+    "Переходы из рекомендательных систем": "Рекомендации",
+    "Переходы по рекламе": "Реклама",
+}
+
+
+def source_name(value: str) -> str:
+    return SOURCE_NAMES.get(value, value)
+
+
+def goal_relevance(name: str) -> int:
+    """2 = primary business goal, 1 = contact intent, 0 = auxiliary goal."""
+    lowered = name.casefold()
+    if "youtube" in lowered or "ютуб" in lowered or "канал" in lowered:
+        return 0
+    primary = ("заяв", "заказ", "покуп", "оплат", "лид", "диалог", "отправ")
+    contact = ("телефон", "звон", "email", "e-mail", "мессенджер", "whatsapp", "чат")
+    if any(term in lowered for term in primary):
+        return 2
+    if any(term in lowered for term in contact):
+        return 1
+    return 0
+
+
+def _signed(value: float) -> str:
+    if value > 0:
+        return f"+{_number(value)}"
+    if value < 0:
+        return f"−{_number(abs(value))}"
+    return "0"
+
+
+def _signed_percent(value: float | None) -> str:
+    if value is None:
+        return "новое"
+    sign = "+" if value > 0 else "−" if value < 0 else ""
+    return f"{sign}{abs(value):.0f}%"
+
+
+def _mover_line(item: BreakdownChange, label: str, link: str | None = None) -> str:
+    arrow = "🔺" if item.delta > 0 else "🔻" if item.delta < 0 else "•"
+    safe_label = html.escape(label)
+    if link:
+        safe_label = f'<a href="{html.escape(link, quote=True)}">{safe_label}</a>'
+    return (
+        f"{arrow} {safe_label}: {_number(item.current)} ← {_number(item.previous)}"
+        f" · {_signed(item.delta)} ({_signed_percent(item.percent)})"
+    )
+
+
+def _page_label(value: str, limit: int = 48) -> str:
+    parsed = urlparse(value if "://" in value else f"https://{value}")
+    path = parsed.path.rstrip("/")
+    if not path:
+        return "Главная"
+    if path == "/blog":
+        return "Блог"
+    slug = path.rsplit("/", 1)[-1].replace("-", " ")
+    prefix = "Статья: " if path.startswith("/blog/") else "Страница: "
+    label = prefix + slug
+    return label if len(label) <= limit else label[: limit - 1] + "…"
+
+
+def _important(item: BreakdownChange, min_previous: float = 5) -> bool:
+    return bool(
+        abs(item.delta) >= 3
+        and (item.previous >= min_previous or item.current >= min_previous)
+        and (item.percent is None or abs(item.percent) >= 20)
+    )
+
+
 def _meaningful(change: Change, min_previous: float, percent: float, absolute: float) -> bool:
     return bool(
         change.percent is not None
@@ -206,86 +294,143 @@ def _meaningful(change: Change, min_previous: float, percent: float, absolute: f
 
 def insights(data: ReportData) -> list[str]:
     notes: list[str] = []
-    visits = data.visits
-    goals = data.goals
+    source_losses = sorted(
+        (item for item in data.sources if item.delta < 0 and _important(item)),
+        key=lambda item: item.delta,
+    )
+    page_losses = sorted(
+        (item for item in data.pages if item.delta < 0 and _important(item)),
+        key=lambda item: item.delta,
+    )
 
-    if goals and _meaningful(goals, 5, 25, 2) and goals.absolute < 0:
-        if not _meaningful(visits, 30, 15, 10):
-            notes.append(
-                "🔴 Целей стало заметно меньше при стабильном трафике. Проверьте формы, телефоны и первый экран ключевых страниц."
-            )
-        else:
-            notes.append(
-                "🔴 Цели просели вместе с трафиком — сначала найдите источник потери визитов."
-            )
-
-    if _meaningful(visits, 30, 15, 10):
-        if visits.absolute < 0:
-            losses = sorted(
-                (item for item in data.sources if item.delta < 0), key=lambda x: x.delta
-            )
-            if losses:
-                lead = losses[0]
-                share = abs(lead.delta) / abs(visits.absolute) if visits.absolute else 0
-                if share >= 0.45:
-                    notes.append(
-                        f"🟡 Главная потеря — «{lead.name}»: {_number(lead.previous)} → {_number(lead.current)} визитов."
-                    )
-            page_losses = sorted(
-                (item for item in data.pages if item.delta < 0), key=lambda x: x.delta
-            )
-            if page_losses:
-                lead_page = page_losses[0]
-                share = abs(lead_page.delta) / abs(visits.absolute) if visits.absolute else 0
-                if share >= 0.35:
-                    notes.append(
-                        f"Проверьте страницу {_short_page(lead_page.name)} — она дала большую часть падения."
-                    )
-            if not notes:
-                notes.append(
-                    "🟡 Трафик снизился сразу в нескольких местах — откройте источники и посадочные страницы."
-                )
-        else:
-            notes.append(
-                "🟢 Трафик заметно вырос. Зафиксируйте источник роста и масштабируйте удачные страницы."
-            )
-
-    if goals and visits.percent is not None and goals.percent is not None:
-        if visits.percent >= 20 and goals.previous >= 5 and goals.percent <= 0:
-            notes.append(
-                "Трафик вырос, а цели — нет: проверьте качество нового источника и соответствие посадочных страниц."
-            )
+    if source_losses:
+        lead = source_losses[0]
+        notes.append(
+            f"Проверить «{source_name(lead.name)}»: визиты снизились "
+            f"с {_number(lead.previous)} до {_number(lead.current)} ({_signed_percent(lead.percent)})."
+        )
+    if page_losses:
+        lead = page_losses[0]
+        notes.append(
+            f"Разобрать страницу «{_page_label(lead.name)}»: она потеряла "
+            f"{_number(abs(lead.delta))} визитов."
+        )
+    if data.goals and _meaningful(data.goals, 5, 25, 2) and data.goals.absolute < 0:
+        notes.append("Проверить формы и контакты: выбранных бизнес-действий стало заметно меньше.")
+    elif (
+        data.goals
+        and data.visits.percent is not None
+        and data.goals.percent is not None
+        and data.visits.percent >= 20
+        and data.goals.previous >= 5
+        and data.goals.percent <= 0
+    ):
+        notes.append("Проверить качество нового трафика: визиты выросли, а бизнес-действия — нет.")
 
     if not notes:
-        notes.append("🟢 Существенных изменений, требующих реакции, не найдено.")
+        notes.append(
+            "Срочных действий нет: заметных провалов по источникам и страницам не найдено."
+        )
     return notes[:3]
+
+
+def _summary(data: ReportData) -> list[str]:
+    visits = data.visits
+    direction = (
+        "больше" if visits.absolute > 0 else "меньше" if visits.absolute < 0 else "столько же"
+    )
+    if visits.absolute:
+        first = (
+            f"Визитов стало на <b>{_number(abs(visits.absolute))} {direction}</b>: "
+            f"{_number(visits.current)} ← {_number(visits.previous)} "
+            f"({_signed_percent(visits.percent)})."
+        )
+    else:
+        first = f"Визитов столько же: <b>{_number(visits.current)}</b>."
+
+    losses = sorted((item for item in data.sources if item.delta < 0), key=lambda item: item.delta)
+    gains = sorted(
+        (item for item in data.sources if item.delta > 0), key=lambda item: item.delta, reverse=True
+    )
+    second = ""
+    if losses and _important(losses[0]):
+        lead = losses[0]
+        second = (
+            f"Главное: <b>{html.escape(source_name(lead.name))}</b> потерял "
+            f"{_number(abs(lead.delta))} визитов"
+        )
+        offsets = [item for item in gains if abs(item.delta) >= 3][:2]
+        if offsets:
+            rendered = " и ".join(
+                f"{html.escape(source_name(item.name))} ({_signed(item.delta)})" for item in offsets
+            )
+            second += f", часть падения скрыли {rendered}."
+        else:
+            second += "."
+    elif gains and _important(gains[0]):
+        lead = gains[0]
+        second = (
+            f"Главный вклад в рост — <b>{html.escape(source_name(lead.name))}</b>: "
+            f"{_signed(lead.delta)} визитов."
+        )
+    else:
+        second = "Внутри источников резких сдвигов не видно."
+    return [first, second]
 
 
 def format_report(data: ReportData, monitor_bot_url: str | None = None) -> str:
     period = data.current_period
     lines = [
-        f"<b>Неделя сайта {html.escape(data.counter_name)}</b>",
+        f"<b>{html.escape(data.counter_name)}: что изменилось за неделю</b>",
         f"{period.start.strftime('%d.%m')}–{period.end.strftime('%d.%m.%Y')} против предыдущих 7 дней",
         "",
-        f"👥 <b>Визиты:</b> {_change(data.visits)}",
-        f"👤 <b>Посетители:</b> {_change(data.users)}",
+        "<b>Итог</b>",
     ]
-    if data.goals:
-        lines.append(f"🎯 <b>Выбранные цели:</b> {_change(data.goals)}")
-    else:
-        lines.append("🎯 <b>Цели не выбраны.</b> Нажмите «Настроить цели», чтобы видеть заявки.")
-    lines.extend(["", "<b>Что требует внимания</b>"])
-    lines.extend(html.escape(note) for note in insights(data))
+    lines.extend(_summary(data))
+    lines.append(f"Посетители: {_change(data.users)}")
 
-    movers = sorted(data.pages, key=lambda item: abs(item.delta), reverse=True)
-    movers = [item for item in movers if abs(item.delta) >= 3][:3]
-    if movers:
-        lines.extend(["", "<b>Страницы с наибольшим изменением</b>"])
-        for item in movers:
-            sign = "+" if item.delta > 0 else ""
-            lines.append(
-                f"• {html.escape(_short_page(item.name))}: {sign}{_number(item.delta)} визитов"
-            )
+    source_movers = sorted(data.sources, key=lambda item: abs(item.delta), reverse=True)
+    source_movers = [item for item in source_movers if abs(item.delta) >= 3][:4]
+    if source_movers:
+        lines.extend(["", "<b>Откуда пришло изменение</b>"])
+        lines.extend(_mover_line(item, source_name(item.name)) for item in source_movers)
+
+    page_losses = sorted(
+        (item for item in data.pages if item.delta <= -3), key=lambda item: item.delta
+    )[:2]
+    page_gains = sorted(
+        (item for item in data.pages if item.delta >= 3), key=lambda item: item.delta, reverse=True
+    )[:2]
+    if page_losses:
+        lines.extend(["", "<b>Где потеряли</b>"])
+        lines.extend(_mover_line(item, _page_label(item.name), item.name) for item in page_losses)
+    if page_gains:
+        lines.extend(["", "<b>Где выросли</b>"])
+        lines.extend(_mover_line(item, _page_label(item.name), item.name) for item in page_gains)
+
+    lines.extend(["", "<b>Бизнес-действия</b>"])
+    selected_business = [name for name in data.goal_names if goal_relevance(name) > 0]
+    selected_auxiliary = [name for name in data.goal_names if goal_relevance(name) == 0]
+    if data.goals and selected_business:
+        lines.append(f"Всего: {_change(data.goals)}")
+        for item in data.goal_details[:5]:
+            lines.append(_mover_line(item, item.name))
+        if selected_auxiliary:
+            names = ", ".join(f"«{name}»" for name in selected_auxiliary)
+            lines.append(f"ℹ️ В сумму также входят вспомогательные цели: {html.escape(names)}.")
+    elif data.goal_names:
+        names = ", ".join(f"«{name}»" for name in data.goal_names)
+        lines.append(
+            f"⚠️ Сейчас выбрано только {html.escape(names)} — это не заявка. "
+            "Выберите заявки, телефон, email, мессенджер или чат."
+        )
+    else:
+        lines.append("⚠️ Цели не выбраны. Настройте заявки, звонки, покупки или чат.")
+
+    lines.extend(["", "<b>Что делать</b>"])
+    lines.extend(
+        f"{index}. {html.escape(note)}" for index, note in enumerate(insights(data), start=1)
+    )
     if data.sampled:
         lines.extend(
             [

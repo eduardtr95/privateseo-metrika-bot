@@ -20,6 +20,7 @@ def report(**overrides):
         users=Change(70, 100),
         goals=Change(8, 12),
         goal_names=["Заявка"],
+        goal_details=[BreakdownChange("Заявка", 8, 12)],
         sources=[BreakdownChange("Переходы из поисковых систем", 40, 75)],
         pages=[BreakdownChange("https://example.ru/service", 20, 50)],
     )
@@ -36,8 +37,8 @@ def test_completed_weeks_uses_last_completed_day():
 
 def test_report_points_to_largest_source_and_page_loss():
     notes = insights(report())
-    assert any("поисковых систем" in item for item in notes)
-    assert any("example.ru/service" in item for item in notes)
+    assert any("Поиск" in item for item in notes)
+    assert any("Страница: service" in item for item in notes)
 
 
 def test_goals_drop_with_stable_traffic_checks_forms():
@@ -59,7 +60,9 @@ def test_small_numbers_do_not_create_false_alarm():
         sources=[],
         pages=[],
     )
-    assert insights(data) == ["🟢 Существенных изменений, требующих реакции, не найдено."]
+    assert insights(data) == [
+        "Срочных действий нет: заметных провалов по источникам и страницам не найдено."
+    ]
 
 
 def test_traffic_growth_without_goal_growth_is_flagged():
@@ -70,11 +73,47 @@ def test_traffic_growth_without_goal_growth_is_flagged():
         sources=[],
         pages=[],
     )
-    assert any("Трафик вырос, а цели" in item for item in insights(data))
+    assert any("визиты выросли, а бизнес-действия" in item for item in insights(data))
 
 
 def test_html_is_escaped_and_message_fits_telegram():
     text = format_report(report(counter_name="<example>"))
     assert "&lt;example&gt;" in text
     assert len(text) <= 4096
-    assert "Что требует внимания" in text
+    assert "Что делать" in text
+
+
+def test_real_report_explains_hidden_search_loss_and_bad_goal():
+    data = report(
+        counter_name="private-seo.ru",
+        visits=Change(107, 119),
+        users=Change(88, 99),
+        goals=Change(0, 0),
+        goal_names=["Переход в YouTube"],
+        goal_details=[BreakdownChange("Переход в YouTube", 0, 0)],
+        sources=[
+            BreakdownChange("Переходы из поисковых систем", 36, 56),
+            BreakdownChange("Переходы по ссылкам на сайтах", 16, 6),
+            BreakdownChange("Внутренние переходы", 7, 13),
+            BreakdownChange("Прямые заходы", 42, 38),
+        ],
+        pages=[
+            BreakdownChange("https://private-seo.ru/", 28, 36),
+            BreakdownChange(
+                "https://private-seo.ru/blog/seo-dlya-sportivnogo-magazina-sezonnye-tovary",
+                0,
+                7,
+            ),
+            BreakdownChange(
+                "https://private-seo.ru/instrumenty/rasshireniye-dlya-seo-audita", 8, 2
+            ),
+            BreakdownChange("https://private-seo.ru/blog/chto-takoe-geo-prodvizhenie-dannye", 5, 0),
+        ],
+    )
+    text = format_report(data)
+    assert "Поиск</b> потерял 20 визитов" in text
+    assert "Ссылки с сайтов (+10)" in text
+    assert "Поиск: 36 ← 56 · −20 (−36%)" in text
+    assert "Где потеряли" in text and "Где выросли" in text
+    assert "Переход в YouTube" in text and "это не заявка" in text
+    assert "Существенных изменений" not in text
