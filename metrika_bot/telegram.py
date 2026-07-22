@@ -30,6 +30,13 @@ class TelegramAPI:
         try:
             with urllib.request.urlopen(request, timeout=timeout) as response:
                 body = json.loads(response.read().decode("utf-8"))
+        except urllib.error.HTTPError as exc:
+            try:
+                error = json.loads(exc.read().decode("utf-8"))
+                description = str(error.get("description") or "Telegram API error")
+            except (json.JSONDecodeError, UnicodeDecodeError):
+                description = "Telegram API error"
+            raise TelegramAPIError(description) from None
         except (urllib.error.URLError, TimeoutError, json.JSONDecodeError):
             raise TelegramAPIError("Telegram API unavailable") from None
         if not body.get("ok"):

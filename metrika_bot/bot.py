@@ -40,9 +40,8 @@ class BotService:
         offset: int | None = None
         try:
             self.telegram.set_commands()
-            self.telegram.set_profile_texts()
         except TelegramAPIError:
-            log.exception("Could not update bot profile")
+            log.exception("Could not set bot commands")
         while not self.stop_event.is_set():
             try:
                 updates = self.telegram.get_updates(offset)
