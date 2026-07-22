@@ -116,6 +116,16 @@ def test_real_report_explains_hidden_search_loss_and_bad_goal():
     assert "Посадочные страницы: наибольшие потери" in text
     assert "Посадочные страницы: наибольший рост" in text
     assert "До 3 страниц в каждом блоке" in text
+    assert "от 10 визитов независимо от процента" in text
     assert "до 500 самых посещаемых страниц" in text
     assert "Переход в YouTube" in text and "это не заявка" in text
     assert "Существенных изменений" not in text
+
+
+def test_large_absolute_page_change_is_not_hidden_by_small_percentage():
+    data = report(
+        visits=Change(100_000, 100_000),
+        pages=[BreakdownChange("https://example.ru/large", 950, 1_000)],
+        sources=[],
+    )
+    assert "Страница: large" in format_report(data)

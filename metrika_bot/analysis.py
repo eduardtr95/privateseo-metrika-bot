@@ -279,7 +279,7 @@ def _important(item: BreakdownChange, min_previous: float = 5) -> bool:
     return bool(
         abs(item.delta) >= 3
         and (item.previous >= min_previous or item.current >= min_previous)
-        and (item.percent is None or abs(item.percent) >= 20)
+        and (item.percent is None or abs(item.percent) >= 20 or abs(item.delta) >= 10)
     )
 
 
@@ -385,7 +385,8 @@ def format_report(data: ReportData, monitor_bot_url: str | None = None) -> str:
         lines.extend(_mover_line(item, _page_label(item.name), item.name) for item in page_gains)
     if page_losses or page_gains:
         lines.append(
-            "<i>До 3 страниц в каждом блоке: изменение от 3 визитов и от 20%. "
+            "<i>До 3 страниц в каждом блоке: изменение от 3 визитов и от 20%, "
+            "либо от 10 визитов независимо от процента. "
             "Сравниваются до 500 самых посещаемых страниц каждого периода.</i>"
         )
 
