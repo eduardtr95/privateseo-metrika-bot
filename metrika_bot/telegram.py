@@ -59,6 +59,23 @@ class TelegramAPI:
             payload["reply_markup"] = {"inline_keyboard": buttons}
         self.call("sendMessage", payload)
 
+    def send_rich_message(
+        self,
+        chat_id: int,
+        rich_html: str,
+        buttons: list[list[dict[str, str]]] | None = None,
+    ) -> None:
+        payload: dict[str, Any] = {
+            "chat_id": chat_id,
+            "rich_message": {
+                "html": rich_html,
+                "skip_entity_detection": True,
+            },
+        }
+        if buttons:
+            payload["reply_markup"] = {"inline_keyboard": buttons}
+        self.call("sendRichMessage", payload)
+
     def answer_callback(self, callback_id: str, text: str | None = None) -> None:
         payload: dict[str, Any] = {"callback_query_id": callback_id}
         if text:

@@ -7,6 +7,7 @@ from metrika_bot.analysis import (
     ReportData,
     completed_weeks,
     format_report,
+    format_rich_report,
     insights,
 )
 
@@ -129,3 +130,12 @@ def test_large_absolute_page_change_is_not_hidden_by_small_percentage():
         sources=[],
     )
     assert "Страница: large" in format_report(data)
+
+
+def test_rich_report_uses_native_tables_and_links():
+    text = format_rich_report(report())
+    assert "<table bordered striped><caption>Итог недели</caption>" in text
+    assert "<th>Было</th><th>Стало</th><th>Изменение</th>" in text
+    assert '<a href="https://example.ru/service">Страница: service</a>' in text
+    assert "<ol><li>" in text
+    assert len(text.encode()) <= 32768

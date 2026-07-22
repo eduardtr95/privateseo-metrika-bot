@@ -351,6 +351,148 @@ def _summary(data: ReportData) -> list[str]:
     return [first]
 
 
+def _report_movers(
+    data: ReportData,
+) -> tuple[list[BreakdownChange], list[BreakdownChange], list[BreakdownChange]]:
+    sources = sorted(data.sources, key=lambda item: abs(item.delta), reverse=True)
+    sources = [item for item in sources if abs(item.delta) >= 3][:4]
+    losses = sorted(
+        (item for item in data.pages if item.delta < 0 and _important(item)),
+        key=lambda item: item.delta,
+    )[:3]
+    gains = sorted(
+        (item for item in data.pages if item.delta > 0 and _important(item)),
+        key=lambda item: item.delta,
+        reverse=True,
+    )[:3]
+    return sources, losses, gains
+
+
+def _rich_delta(item: BreakdownChange) -> str:
+    marker = "🟢" if item.delta > 0 else "🔴" if item.delta < 0 else "⚪️"
+    return f"{marker} {_signed(item.delta)} · {_signed_percent(item.percent)}"
+
+
+def _rich_change(change: Change) -> str:
+    marker = "🟢" if change.absolute > 0 else "🔴" if change.absolute < 0 else "⚪️"
+    return f"{marker} {_signed(change.absolute)} · {_signed_percent(change.percent)}"
+
+
+def _rich_table(caption: str, rows: list[tuple[str, float, float, str]]) -> str:
+    rendered = [
+        f"<table bordered striped><caption>{html.escape(caption)}</caption>",
+        "<tr><th>Показатель</th><th>Было</th><th>Стало</th><th>Изменение</th></tr>",
+    ]
+    for label, previous, current, change in rows:
+        rendered.append(
+            "<tr>"
+            f"<td>{label}</td>"
+            f'<td align="right">{_number(previous)}</td>'
+            f'<td align="right">{_number(current)}</td>'
+            f'<td align="right">{html.escape(change)}</td>'
+            "</tr>"
+        )
+    rendered.append("</table>")
+    return "".join(rendered)
+
+
+def format_rich_report(data: ReportData) -> str:
+    """Telegram Bot API 10.2 native Rich Message with real tables."""
+    period = data.current_period
+    sources, page_losses, page_gains = _report_movers(data)
+    blocks = [
+        f"<h2>{html.escape(data.counter_name)}</h2>",
+        (
+            f"<p>{period.start.strftime('%d.%m')}–{period.end.strftime('%d.%m.%Y')} "
+            "против предыдущих 7 дней</p>"
+        ),
+        _rich_table(
+            "Итог недели",
+            [
+                (
+                    "Визиты",
+                    data.visits.previous,
+                    data.visits.current,
+                    _rich_change(data.visits),
+                ),
+                (
+                    "Посетители",
+                    data.users.previous,
+                    data.users.current,
+                    _rich_change(data.users),
+                ),
+            ],
+        ),
+    ]
+
+    if sources:
+        blocks.append(
+            _rich_table(
+                "Почему изменился итог",
+                [
+                    (
+                        html.escape(source_name(item.name)),
+                        item.previous,
+                        item.current,
+                        _rich_delta(item),
+                    )
+                    for item in sources
+                ],
+            )
+        )
+
+    def page_rows(items: list[BreakdownChange]) -> list[tuple[str, float, float, str]]:
+        rows = []
+        for item in items:
+            label = html.escape(_page_label(item.name))
+            label = f'<a href="{html.escape(item.name, quote=True)}">{label}</a>'
+            rows.append((label, item.previous, item.current, _rich_delta(item)))
+        return rows
+
+    if page_losses:
+        blocks.append(_rich_table("Посадочные страницы · потери", page_rows(page_losses)))
+    if page_gains:
+        blocks.append(_rich_table("Посадочные страницы · рост", page_rows(page_gains)))
+    if page_losses or page_gains:
+        blocks.append(
+            "<footer>Показано до 3 страниц: ≥3 визитов и ≥20%, либо ≥10 визитов. "
+            "Анализируются до 500 самых посещаемых страниц каждого периода.</footer>"
+        )
+
+    selected_business = [name for name in data.goal_names if goal_relevance(name) > 0]
+    selected_auxiliary = [name for name in data.goal_names if goal_relevance(name) == 0]
+    if data.goals and selected_business:
+        goal_rows = [
+            (html.escape(item.name), item.previous, item.current, _rich_delta(item))
+            for item in data.goal_details[:5]
+        ]
+        blocks.append(_rich_table("Бизнес-действия", goal_rows))
+        if selected_auxiliary:
+            names = ", ".join(f"«{name}»" for name in selected_auxiliary)
+            blocks.append(
+                f"<footer>В сумму также входят вспомогательные цели: {html.escape(names)}.</footer>"
+            )
+    elif data.goal_names:
+        names = ", ".join(f"«{name}»" for name in data.goal_names)
+        blocks.append(
+            f"<blockquote>⚠️ Выбрано только {html.escape(names)} — это не заявка.<br>"
+            "Выберите заявки, телефон, email, мессенджер или чат.</blockquote>"
+        )
+    else:
+        blocks.append(
+            "<blockquote>⚠️ Бизнес-цели не выбраны.<br>"
+            "Настройте заявки, звонки, покупки или чат.</blockquote>"
+        )
+
+    actions = "".join(f"<li>{html.escape(note)}</li>" for note in insights(data))
+    blocks.extend(["<h3>Что делать</h3>", f"<ol>{actions}</ol>"])
+    if data.sampled:
+        blocks.append(
+            "<footer>Метрика применила семплирование: небольшие изменения могут быть неточными.</footer>"
+        )
+    return "".join(blocks)
+
+
 def format_report(data: ReportData, monitor_bot_url: str | None = None) -> str:
     period = data.current_period
     lines = [
@@ -362,21 +504,11 @@ def format_report(data: ReportData, monitor_bot_url: str | None = None) -> str:
     lines.extend(_summary(data))
     lines.append(f"Посетители: {_change(data.users)}")
 
-    source_movers = sorted(data.sources, key=lambda item: abs(item.delta), reverse=True)
-    source_movers = [item for item in source_movers if abs(item.delta) >= 3][:4]
+    source_movers, page_losses, page_gains = _report_movers(data)
     if source_movers:
         lines.extend(["", "<b>Почему изменился итог</b>"])
         lines.extend(_mover_line(item, source_name(item.name)) for item in source_movers)
 
-    page_losses = sorted(
-        (item for item in data.pages if item.delta < 0 and _important(item)),
-        key=lambda item: item.delta,
-    )[:3]
-    page_gains = sorted(
-        (item for item in data.pages if item.delta > 0 and _important(item)),
-        key=lambda item: item.delta,
-        reverse=True,
-    )[:3]
     if page_losses:
         lines.extend(["", "<b>Посадочные страницы: наибольшие потери</b>"])
         lines.extend(_mover_line(item, _page_label(item.name), item.name) for item in page_losses)

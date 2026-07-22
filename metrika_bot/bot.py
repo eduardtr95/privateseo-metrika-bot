@@ -9,7 +9,7 @@ from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime
 from zoneinfo import ZoneInfo
 
-from .analysis import ReportBuilder, format_report, goal_relevance
+from .analysis import ReportBuilder, ReportData, format_report, format_rich_report, goal_relevance
 from .config import Config
 from .db import Database
 from .telegram import TelegramAPI, TelegramAPIError
@@ -217,15 +217,23 @@ class BotService:
             return
         self.telegram.send_message(chat_id, "Собираю отчёт — обычно это занимает несколько секунд…")
         data = self.reports.collect(chat_id, connection)
-        self.telegram.send_message(
-            chat_id,
-            format_report(data),
-            [
+        self._send_formatted_report(chat_id, data, with_buttons=True)
+        self.db.event(chat_id, "report_manual", str(connection["counter_id"]))
+
+    def _send_formatted_report(
+        self, chat_id: int, data: ReportData, with_buttons: bool = False
+    ) -> None:
+        buttons = None
+        if with_buttons:
+            buttons = [
                 [{"text": "Настроить цели", "callback_data": "goals"}],
                 [{"text": "Другой счётчик", "callback_data": "counters"}],
-            ],
-        )
-        self.db.event(chat_id, "report_manual", str(connection["counter_id"]))
+            ]
+        try:
+            self.telegram.send_rich_message(chat_id, format_rich_report(data), buttons)
+        except TelegramAPIError:
+            log.warning("Rich message unavailable for chat %s; using HTML fallback", chat_id)
+            self.telegram.send_message(chat_id, format_report(data), buttons)
 
     def _handle_callback(self, callback: dict) -> None:
         callback_id = str(callback["id"])
@@ -298,7 +306,7 @@ class BotService:
                     chat_id = int(row["chat_id"])
                     try:
                         data = self.reports.collect(chat_id, row, today=now.date())
-                        self.telegram.send_message(chat_id, format_report(data))
+                        self._send_formatted_report(chat_id, data)
                         self.db.mark_report_sent(chat_id, report_key)
                         self.db.event(chat_id, "report_scheduled", report_key)
                     except Exception:
