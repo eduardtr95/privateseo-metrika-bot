@@ -2,8 +2,10 @@ from __future__ import annotations
 
 import json
 import logging
+import secrets
 import urllib.error
 import urllib.request
+from pathlib import Path
 from typing import Any
 
 
@@ -119,6 +121,47 @@ class TelegramAPI:
                 )
             },
         )
+
+    def set_profile_photo(self, path: Path) -> None:
+        boundary = "----PrivateSEOBot" + secrets.token_hex(12)
+        photo = json.dumps(
+            {"type": "static", "photo": "attach://avatar"}, ensure_ascii=False
+        ).encode()
+        image = path.read_bytes()
+        body = b"".join(
+            [
+                f"--{boundary}\r\n".encode(),
+                b'Content-Disposition: form-data; name="photo"\r\n',
+                b"Content-Type: application/json\r\n\r\n",
+                photo,
+                b"\r\n",
+                f"--{boundary}\r\n".encode(),
+                b'Content-Disposition: form-data; name="avatar"; filename="bot-avatar.jpg"\r\n',
+                b"Content-Type: image/jpeg\r\n\r\n",
+                image,
+                b"\r\n",
+                f"--{boundary}--\r\n".encode(),
+            ]
+        )
+        request = urllib.request.Request(
+            self.base_url + "setMyProfilePhoto",
+            data=body,
+            headers={"Content-Type": f"multipart/form-data; boundary={boundary}"},
+            method="POST",
+        )
+        try:
+            with urllib.request.urlopen(request, timeout=30) as response:
+                payload = json.loads(response.read().decode())
+        except urllib.error.HTTPError as exc:
+            try:
+                description = json.loads(exc.read().decode()).get("description")
+            except (json.JSONDecodeError, UnicodeDecodeError):
+                description = None
+            raise TelegramAPIError(description or "Could not set bot profile photo") from None
+        except (urllib.error.URLError, TimeoutError, json.JSONDecodeError):
+            raise TelegramAPIError("Telegram API unavailable") from None
+        if not payload.get("ok"):
+            raise TelegramAPIError(str(payload.get("description") or "Telegram API error"))
         self.call(
             "setMyDescription",
             {
