@@ -1,6 +1,12 @@
 from metrika_bot.telegram import TelegramAPI
 
 
+def test_bot_module_imports():
+    from metrika_bot.bot import BotService
+
+    assert BotService is not None
+
+
 def test_profile_texts_update_name_short_and_full_description(monkeypatch):
     telegram = TelegramAPI("token")
     calls = []

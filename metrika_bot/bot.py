@@ -161,7 +161,7 @@ class BotService:
     def _help(self, chat_id: int) -> None:
         self.telegram.send_message(
             chat_id,
-            "<b>Как пользоваться</b>\n\n/week — отчёт сейчас\n/counters — выбрать сайт\n/goals — выбрать заявки и продажи\n/schedule — дни и время отчётов\n/pause — выключить автодайджест\n/resume — включить обратно\n/disconnect — удалить доступ к Метрике\n/privacy — какие данные хранятся\n/feedback — вопросы и предложения\n\n<b>Обратная связь</b>\nНашли ошибку, чего-то не хватает или есть идея? Напишите Эдуарду: <a href="https://t.me/eduardtr95">@eduardtr95</a>.\n\n<b>Другие продукты PrivateSEO</b>\n"
+            '<b>Как пользоваться</b>\n\n/week — отчёт сейчас\n/counters — выбрать сайт\n/goals — выбрать заявки и продажи\n/schedule — дни и время отчётов\n/pause — выключить автодайджест\n/resume — включить обратно\n/disconnect — удалить доступ к Метрике\n/privacy — какие данные хранятся\n/feedback — вопросы и предложения\n\n<b>Обратная связь</b>\nНашли ошибку, чего-то не хватает или есть идея? Напишите Эдуарду: <a href="https://t.me/eduardtr95">@eduardtr95</a>.\n\n<b>Другие продукты PrivateSEO</b>\n'
             '🌐 <a href="https://private-seo.ru/?utm_source=telegram&amp;utm_medium=bot&amp;utm_campaign=metrika_bot&amp;utm_content=help">Сайт SEO- и GEO-агентства</a>\n'
             '🧩 <a href="https://chromewebstore.google.com/detail/privateseo-ai-auditor-seo/nblbceehggefmhkioijdbppdboimoicg">PrivateSEO AI Auditor для Chrome</a>\n'
             "🟢 Следить за падениями, SSL, noindex и robots.txt: "
