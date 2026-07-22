@@ -151,6 +151,33 @@ class Database:
                 (json.dumps(sorted(set(goal_ids))), chat_id),
             )
 
+    def toggle_goal(
+        self, chat_id: int, goal_id: int, limit: int = 15
+    ) -> tuple[list[int], bool | None]:
+        """Atomically toggle a goal. The second value is True=added, False=removed, None=limit."""
+        with self.connect() as conn:
+            conn.execute("BEGIN IMMEDIATE")
+            row = conn.execute(
+                "SELECT goal_ids FROM connections WHERE chat_id = ?", (chat_id,)
+            ).fetchone()
+            if not row:
+                return [], None
+            selected = set(json.loads(row["goal_ids"] or "[]"))
+            if goal_id in selected:
+                selected.remove(goal_id)
+                added: bool | None = False
+            elif len(selected) >= limit:
+                return sorted(selected), None
+            else:
+                selected.add(goal_id)
+                added = True
+            result = sorted(selected)
+            conn.execute(
+                "UPDATE connections SET goal_ids = ? WHERE chat_id = ?",
+                (json.dumps(result), chat_id),
+            )
+            return result, added
+
     def disconnect(self, chat_id: int) -> None:
         with self.connect() as conn:
             conn.execute("DELETE FROM connections WHERE chat_id = ?", (chat_id,))

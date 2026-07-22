@@ -200,6 +200,12 @@ class BotService:
             buttons.append(
                 [{"text": f"{mark} {recommended}{name}"[:55], "callback_data": f"goal:{goal_id}"}]
             )
+        buttons.append(
+            [
+                {"text": "⭐ Выбрать рекомендуемые", "callback_data": "goals:recommended"},
+                {"text": "Снять всё", "callback_data": "goals:clear"},
+            ]
+        )
         buttons.append([{"text": "Готово — показать отчёт", "callback_data": "week"}])
         self.telegram.send_message(
             chat_id,
@@ -244,7 +250,9 @@ class BotService:
         username = callback.get("from", {}).get("username")
         self.db.upsert_user(chat_id, username)
         data = str(callback.get("data") or "")
-        self.telegram.answer_callback(callback_id)
+        goal_action = data.startswith("goal:") or data.startswith("goals:")
+        if not goal_action:
+            self.telegram.answer_callback(callback_id)
 
         if data == "week":
             self.send_report(chat_id)
@@ -277,22 +285,49 @@ class BotService:
             goal_id = int(data.split(":", 1)[1])
             connection = self.db.get_connection(chat_id)
             if not connection:
+                self.telegram.answer_callback(callback_id, "Сначала подключите Метрику")
                 self._welcome(chat_id)
                 return
-            selected = set(json.loads(connection["goal_ids"] or "[]"))
-            if goal_id in selected:
-                selected.remove(goal_id)
-                response = "Цель убрана"
-            elif len(selected) >= 15:
+            selected, added = self.db.toggle_goal(chat_id, goal_id)
+            if added is None:
                 self.telegram.answer_callback(callback_id, "Можно выбрать не больше 15 целей")
                 return
-            else:
-                selected.add(goal_id)
-                response = "Цель добавлена"
+            self._update_goal_message(callback, set(selected))
+            self.telegram.answer_callback(callback_id, "Цель добавлена" if added else "Цель убрана")
+        elif data in {"goals:recommended", "goals:clear"}:
+            buttons = callback["message"].get("reply_markup", {}).get("inline_keyboard", [])
+            recommended = []
+            if data == "goals:recommended":
+                for row in buttons:
+                    for button in row:
+                        value = str(button.get("callback_data") or "")
+                        if value.startswith("goal:") and "⭐" in str(button.get("text") or ""):
+                            recommended.append(int(value.split(":", 1)[1]))
+            selected = set(recommended[:15])
             self.db.set_goals(chat_id, list(selected))
-            self.telegram.send_message(
-                chat_id, response + ". /goals — продолжить настройку, /week — отчёт."
-            )
+            self._update_goal_message(callback, selected)
+            response = "Рекомендуемые цели выбраны" if selected else "Все цели сняты"
+            self.telegram.answer_callback(callback_id, response)
+
+    def _update_goal_message(self, callback: dict, selected: set[int]) -> None:
+        message = callback["message"]
+        buttons = message.get("reply_markup", {}).get("inline_keyboard", [])
+        for row in buttons:
+            for button in row:
+                value = str(button.get("callback_data") or "")
+                if not value.startswith("goal:"):
+                    continue
+                goal_id = int(value.split(":", 1)[1])
+                label = str(button.get("text") or "")
+                for prefix in ("✅ ", "▫️ "):
+                    if label.startswith(prefix):
+                        label = label[len(prefix) :]
+                        break
+                mark = "✅" if goal_id in selected else "▫️"
+                button["text"] = f"{mark} {label}"[:55]
+        self.telegram.edit_message_reply_markup(
+            int(message["chat"]["id"]), int(message["message_id"]), buttons
+        )
 
     def run_scheduler(self) -> None:
         timezone = ZoneInfo(self.config.report_timezone)

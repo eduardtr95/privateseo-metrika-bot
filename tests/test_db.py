@@ -34,3 +34,13 @@ def test_due_report_is_idempotent(tmp_path: Path):
     assert [row["chat_id"] for row in db.due_users("2026-W30")] == [123]
     db.mark_report_sent(123, "2026-W30")
     assert db.due_users("2026-W30") == []
+
+
+def test_toggle_goal_updates_selection_without_new_message(tmp_path: Path):
+    db = Database(tmp_path / "bot.sqlite3")
+    db.upsert_user(123, "user")
+    db.save_tokens(123, "encrypted", None, None)
+    db.select_counter(123, 55, "example")
+    assert db.toggle_goal(123, 7) == ([7], True)
+    assert db.toggle_goal(123, 8) == ([7, 8], True)
+    assert db.toggle_goal(123, 7) == ([8], False)
