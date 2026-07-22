@@ -169,7 +169,8 @@ class TelegramAPI:
                     "Подключите Яндекс Метрику — бот покажет причины изменений: "
                     "источники, посадочные страницы и бизнес-цели. Ежедневные или "
                     "еженедельные отчёты в выбранное время. Доступ только на чтение. "
-                    "Open source by PrivateSEO."
+                    "Open source by PrivateSEO: "
+                    "github.com/eduardtr95/privateseo-metrika-bot"
                 )
             },
         )
