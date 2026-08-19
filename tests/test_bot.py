@@ -29,8 +29,11 @@ def test_blocking_bot_deletes_all_private_user_data(tmp_path: Path):
 
 
 class TelegramStub:
+    def __init__(self):
+        self.messages = []
+
     def send_message(self, *args, **kwargs):
-        del args, kwargs
+        self.messages.append((args, kwargs))
 
     def send_chat_action(self, *args, **kwargs):
         del args, kwargs
@@ -87,6 +90,21 @@ def test_invalid_start_payload_is_recorded_as_direct(tmp_path: Path):
     )
 
     assert db.get_user(123)["first_start_payload"] == "direct"
+
+
+def test_welcome_explains_yandex_warning_before_oauth(tmp_path: Path):
+    db = Database(tmp_path / "bot.sqlite3")
+    service = object.__new__(BotService)
+    service.db = db
+    service.telegram = TelegramStub()
+    service.yandex = YandexStub()
+
+    service._welcome(123)
+
+    text = service.telegram.messages[0][0][1]
+    assert "Приложение не проверено" in text
+    assert "доступ только на чтение" in text
+    assert "не может менять счётчики" in text
 
 
 def test_duplicate_counter_names_are_disambiguated_by_site_or_id():
