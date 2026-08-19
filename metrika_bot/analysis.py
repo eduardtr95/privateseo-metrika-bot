@@ -313,7 +313,15 @@ def source_name(value: str) -> str:
 def goal_relevance(name: str) -> int:
     """2 = primary business goal, 1 = contact intent, 0 = auxiliary goal."""
     lowered = name.casefold()
-    if "youtube" in lowered or "ютуб" in lowered or "канал" in lowered:
+    auxiliary = (
+        "youtube",
+        "ютуб",
+        "канал",
+        "открытие формы",
+        "открыть форму",
+        "отправить на телефон",
+    )
+    if any(term in lowered for term in auxiliary):
         return 0
     primary = ("заяв", "заказ", "покуп", "оплат", "лид", "диалог", "отправ")
     contact = ("телефон", "звон", "email", "e-mail", "мессенджер", "whatsapp", "чат")
@@ -553,7 +561,7 @@ def format_rich_report(data: ReportData) -> str:
     if sources:
         blocks.append(
             _rich_table(
-                "Почему изменился итог",
+                "Главные изменения по источникам",
                 [
                     (
                         html.escape(source_name(item.name)),
@@ -657,7 +665,7 @@ def format_report(data: ReportData, monitor_bot_url: str | None = None) -> str:
 
     source_movers, page_losses, page_gains = _report_movers(data)
     if source_movers:
-        lines.extend(["", "<b>Почему изменился итог</b>"])
+        lines.extend(["", "<b>Главные изменения по источникам</b>"])
         lines.extend(_mover_line(item, source_name(item.name)) for item in source_movers)
 
     if page_losses:

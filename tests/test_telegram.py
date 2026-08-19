@@ -42,3 +42,17 @@ def test_polling_subscribes_to_private_chat_block_events(monkeypatch):
 
     assert captured["method"] == "getUpdates"
     assert "my_chat_member" in captured["payload"]["allowed_updates"]
+
+
+def test_chat_action_uses_typing_by_default(monkeypatch):
+    telegram = TelegramAPI("token")
+    captured = {}
+
+    def fake_call(method, payload=None, timeout=30):
+        captured.update(method=method, payload=payload, timeout=timeout)
+
+    monkeypatch.setattr(telegram, "call", fake_call)
+    telegram.send_chat_action(123)
+
+    assert captured["method"] == "sendChatAction"
+    assert captured["payload"] == {"chat_id": 123, "action": "typing"}

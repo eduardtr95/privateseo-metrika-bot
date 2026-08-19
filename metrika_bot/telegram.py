@@ -68,6 +68,9 @@ class TelegramAPI:
             payload["reply_markup"] = {"inline_keyboard": buttons}
         self.call("sendMessage", payload)
 
+    def send_chat_action(self, chat_id: int, action: str = "typing") -> None:
+        self.call("sendChatAction", {"chat_id": chat_id, "action": action})
+
     def send_rich_message(
         self,
         chat_id: int,

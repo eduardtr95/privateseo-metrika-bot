@@ -11,6 +11,7 @@ from metrika_bot.analysis import (
     completed_weeks,
     format_report,
     format_rich_report,
+    goal_relevance,
     insights,
 )
 
@@ -83,6 +84,13 @@ def test_zero_to_zero_goal_is_not_labeled_as_new():
         report(goal_details=[BreakdownChange("Заявка", 0, 0)], goals=Change(0, 0))
     )
     assert "Заявка: 0 ← 0 · 0 (0%)" in text
+
+
+def test_goal_recommendation_rejects_pre_conversion_actions():
+    assert goal_relevance("Открытие формы заявки") == 0
+    assert goal_relevance("Отправить на телефон") == 0
+    assert goal_relevance("Успешная отправка заявки") == 2
+    assert goal_relevance("Клик по телефону") == 1
 
 
 def test_goals_drop_with_stable_traffic_checks_forms():

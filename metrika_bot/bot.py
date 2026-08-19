@@ -22,6 +22,30 @@ WEEKDAYS = ("Пн", "Вт", "Ср", "Чт", "Пт", "Сб", "Вс")
 START_PAYLOAD_RE = re.compile(r"[A-Za-z0-9_-]{1,64}")
 
 
+def counter_button_labels(counters: list[dict]) -> list[str]:
+    names = [str(item.get("name") or item.get("site") or item["id"]) for item in counters]
+    counts: dict[str, int] = {}
+    for name in names:
+        key = name.casefold()
+        counts[key] = counts.get(key, 0) + 1
+
+    labels = []
+    for counter, name in zip(counters, names, strict=True):
+        if counts[name.casefold()] == 1:
+            labels.append(name[:50])
+            continue
+        site = str(counter.get("site") or "").strip()
+        suffix = (
+            f"{site} · #{counter['id']}"
+            if site and site.casefold() != name.casefold()
+            else f"#{counter['id']}"
+        )
+        room = max(8, 50 - len(suffix) - 3)
+        compact_name = name if len(name) <= room else name[: room - 1] + "…"
+        labels.append(f"{compact_name} · {suffix}"[:50])
+    return labels
+
+
 class BotService:
     def __init__(
         self,
@@ -266,9 +290,9 @@ class BotService:
             )
             return
         buttons = []
-        for counter in counters[:40]:
-            name = str(counter.get("name") or counter.get("site") or counter["id"])
-            buttons.append([{"text": name[:50], "callback_data": f"counter:{counter['id']}"}])
+        visible = counters[:40]
+        for counter, label in zip(visible, counter_button_labels(visible), strict=True):
+            buttons.append([{"text": label, "callback_data": f"counter:{counter['id']}"}])
         self.telegram.send_message(chat_id, "Выберите сайт, по которому нужен отчёт:", buttons)
 
     def send_goals(self, chat_id: int) -> None:
@@ -318,7 +342,10 @@ class BotService:
         if not connection["counter_id"]:
             self.send_counters(chat_id)
             return
-        self.telegram.send_message(chat_id, "Собираю отчёт — обычно это занимает несколько секунд…")
+        try:
+            self.telegram.send_chat_action(chat_id)
+        except TelegramAPIError:
+            log.debug("Could not send typing action for chat %s", chat_id)
         data = self.reports.collect(chat_id, connection)
         self._send_formatted_report(chat_id, data, with_buttons=True)
         self.db.event(chat_id, "report_manual", str(connection["counter_id"]))

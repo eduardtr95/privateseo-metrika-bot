@@ -1,7 +1,7 @@
 from pathlib import Path
 from types import SimpleNamespace
 
-from metrika_bot.bot import BotService
+from metrika_bot.bot import BotService, counter_button_labels
 from metrika_bot.db import Database
 
 
@@ -28,6 +28,9 @@ def test_blocking_bot_deletes_all_private_user_data(tmp_path: Path):
 
 class TelegramStub:
     def send_message(self, *args, **kwargs):
+        del args, kwargs
+
+    def send_chat_action(self, *args, **kwargs):
         del args, kwargs
 
 
@@ -79,3 +82,23 @@ def test_invalid_start_payload_is_recorded_as_direct(tmp_path: Path):
     )
 
     assert db.get_user(123)["first_start_payload"] == "direct"
+
+
+def test_duplicate_counter_names_are_disambiguated_by_site_or_id():
+    labels = counter_button_labels(
+        [
+            {"id": 1, "name": "Ягуар", "site": "jaguar-one.ru"},
+            {"id": 2, "name": "Ягуар", "site": "jaguar-two.ru"},
+            {"id": 3, "name": "Один счётчик", "site": "single.ru"},
+            {"id": 4, "name": "Без сайта"},
+            {"id": 5, "name": "Без сайта"},
+        ]
+    )
+
+    assert labels == [
+        "Ягуар · jaguar-one.ru · #1",
+        "Ягуар · jaguar-two.ru · #2",
+        "Один счётчик",
+        "Без сайта · #4",
+        "Без сайта · #5",
+    ]
