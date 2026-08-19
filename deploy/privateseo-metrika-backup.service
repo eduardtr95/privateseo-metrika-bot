@@ -13,4 +13,4 @@ NoNewPrivileges=true
 PrivateTmp=true
 ProtectSystem=strict
 ProtectHome=true
-ReadWritePaths=/var/backups/privateseo-metrika-bot
+ReadWritePaths=/var/lib/privateseo-metrika-bot /var/backups/privateseo-metrika-bot
