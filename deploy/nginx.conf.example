@@ -1,6 +1,8 @@
 server {
     listen 443 ssl http2;
     server_name analytics-bot.example.com;
+    # OAuth callback query contains a one-time code and state; never put it in access logs.
+    access_log off;
 
     # Укажите сертификат Let's Encrypt для своего домена.
     ssl_certificate /etc/letsencrypt/live/analytics-bot.example.com/fullchain.pem;
