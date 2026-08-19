@@ -1,0 +1,16 @@
+[Unit]
+Description=Backup PrivateSEO Metrika bot database
+After=privateseo-metrika-bot.service
+
+[Service]
+Type=oneshot
+User=metrikabot
+Group=metrikabot
+UMask=0077
+WorkingDirectory=/opt/privateseo-metrika-bot
+ExecStart=/opt/privateseo-metrika-bot/.venv/bin/python -m metrika_bot.backup --database /var/lib/privateseo-metrika-bot/bot.sqlite3 --output-dir /var/backups/privateseo-metrika-bot --keep-days 14
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=true
+ReadWritePaths=/var/backups/privateseo-metrika-bot

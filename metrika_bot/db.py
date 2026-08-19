@@ -200,6 +200,10 @@ class Database:
 
     def delete_user(self, chat_id: int) -> None:
         with self.connect() as conn:
+            # Events intentionally have no foreign key because some system events
+            # are anonymous. User-scoped events still contain the Telegram chat ID
+            # and therefore must be removed explicitly.
+            conn.execute("DELETE FROM events WHERE chat_id = ?", (chat_id,))
             conn.execute("DELETE FROM users WHERE chat_id = ?", (chat_id,))
 
     def toggle_reports(self, chat_id: int, enabled: bool) -> None:

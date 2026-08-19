@@ -85,7 +85,11 @@ def make_handler(service: BotService) -> type[BaseHTTPRequestHandler]:
             self.wfile.write(encoded)
 
         def log_message(self, fmt: str, *args: object) -> None:
-            log.info("oauth-http " + fmt, *args)
+            # BaseHTTPRequestHandler includes the full request target in its
+            # default access log. OAuth callbacks carry a short-lived code and
+            # state in the query string, so only the path is safe to record.
+            safe_path = urllib.parse.urlsplit(self.path).path
+            log.info("oauth-http %s %s", self.command, safe_path)
 
     return Handler
 

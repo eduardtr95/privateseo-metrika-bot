@@ -65,3 +65,19 @@ def test_user_report_schedule_can_be_changed(tmp_path: Path):
         1,
     )
     assert [row["chat_id"] for row in db.scheduled_users()] == [123]
+
+
+def test_delete_user_removes_connection_oauth_state_and_events(tmp_path: Path):
+    db = Database(tmp_path / "bot.sqlite3")
+    db.upsert_user(123, "user")
+    db.save_tokens(123, "encrypted", None, None)
+    db.save_oauth_state("state", 123, "verifier")
+    db.event(123, "report_manual", "55")
+
+    db.delete_user(123)
+
+    assert db.get_user(123) is None
+    assert db.get_connection(123) is None
+    with db.connect() as conn:
+        assert conn.execute("SELECT COUNT(*) FROM oauth_states").fetchone()[0] == 0
+        assert conn.execute("SELECT COUNT(*) FROM events WHERE chat_id = 123").fetchone()[0] == 0

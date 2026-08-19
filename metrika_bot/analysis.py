@@ -129,23 +129,83 @@ class ReportBuilder:
         goals = self.yandex.goals(chat_id, counter_id)
         goal_map = {int(goal["id"]): str(goal.get("name") or goal["id"]) for goal in goals}
         selected = [goal_id for goal_id in goal_ids if goal_id in goal_map][:15]
-        metrics = ["ym:s:visits", "ym:s:users"] + [
-            f"ym:s:goal{goal_id}reaches" for goal_id in selected
-        ]
         current, previous = completed_periods(days, today)
 
         cur_total = self.yandex.report(
-            chat_id, counter_id, current.api_start, current.api_end, metrics
+            chat_id,
+            counter_id,
+            current.api_start,
+            current.api_end,
+            ["ym:s:visits", "ym:s:users"],
         )
         prev_total = self.yandex.report(
-            chat_id, counter_id, previous.api_start, previous.api_end, metrics
+            chat_id,
+            counter_id,
+            previous.api_start,
+            previous.api_end,
+            ["ym:s:visits", "ym:s:users"],
         )
         cur_values, prev_values = _totals(cur_total), _totals(prev_total)
-        cur_goals = sum(cur_values[2:]) if selected else None
-        prev_goals = sum(prev_values[2:]) if selected else None
+
+        goal_payloads: list[dict[str, Any]] = []
+        cur_goal_values: list[float] = []
+        prev_goal_values: list[float] = []
+        # Reporting API accepts at most ten metrics in one request. Goal details
+        # are deliberately batched so the advertised 15-goal selection works.
+        for offset in range(0, len(selected), 10):
+            goal_batch = selected[offset : offset + 10]
+            goal_metrics = [f"ym:s:goal{goal_id}reaches" for goal_id in goal_batch]
+            cur_payload = self.yandex.report(
+                chat_id,
+                counter_id,
+                current.api_start,
+                current.api_end,
+                goal_metrics,
+            )
+            prev_payload = self.yandex.report(
+                chat_id,
+                counter_id,
+                previous.api_start,
+                previous.api_end,
+                goal_metrics,
+            )
+            goal_payloads.extend((cur_payload, prev_payload))
+            cur_goal_values.extend(_totals(cur_payload))
+            prev_goal_values.extend(_totals(prev_payload))
+
+        business_goal_ids = [
+            goal_id for goal_id in selected if goal_relevance(goal_map[goal_id]) > 0
+        ]
+        goal_visit_payloads: list[dict[str, Any]] = []
+        cur_goals: float | None = None
+        prev_goals: float | None = None
+        if business_goal_ids:
+            goal_filter = " OR ".join(
+                f"ym:s:goal{goal_id}IsReached=='yes'" for goal_id in business_goal_ids
+            )
+            cur_goal_visits = self.yandex.report(
+                chat_id,
+                counter_id,
+                current.api_start,
+                current.api_end,
+                ["ym:s:visits"],
+                filters=goal_filter,
+            )
+            prev_goal_visits = self.yandex.report(
+                chat_id,
+                counter_id,
+                previous.api_start,
+                previous.api_end,
+                ["ym:s:visits"],
+                filters=goal_filter,
+            )
+            goal_visit_payloads.extend((cur_goal_visits, prev_goal_visits))
+            cur_goals = (_totals(cur_goal_visits) or [0])[0]
+            prev_goals = (_totals(prev_goal_visits) or [0])[0]
+
         goal_details = [
-            BreakdownChange(goal_map[goal_id], cur_values[index], prev_values[index])
-            for index, goal_id in enumerate(selected, start=2)
+            BreakdownChange(goal_map[goal_id], cur_goal_values[index], prev_goal_values[index])
+            for index, goal_id in enumerate(selected)
         ]
 
         source_dimension = ["ym:s:trafficSource"]
@@ -186,7 +246,16 @@ class ReportBuilder:
         )
         sampled = any(
             payload.get("sampled") is True
-            for payload in (cur_total, prev_total, cur_sources, prev_sources, cur_pages, prev_pages)
+            for payload in (
+                cur_total,
+                prev_total,
+                cur_sources,
+                prev_sources,
+                cur_pages,
+                prev_pages,
+                *goal_payloads,
+                *goal_visit_payloads,
+            )
         )
         return ReportData(
             counter_name=str(connection["counter_name"] or counter_id),
@@ -194,7 +263,11 @@ class ReportBuilder:
             previous_period=previous,
             visits=Change(cur_values[0], prev_values[0]),
             users=Change(cur_values[1], prev_values[1]),
-            goals=Change(cur_goals, prev_goals) if cur_goals is not None else None,
+            goals=(
+                Change(cur_goals, prev_goals)
+                if cur_goals is not None and prev_goals is not None
+                else None
+            ),
             goal_names=[goal_map[goal_id] for goal_id in selected],
             goal_details=goal_details,
             sources=compare_breakdowns(_breakdown(cur_sources), _breakdown(prev_sources)),
@@ -227,7 +300,10 @@ SOURCE_NAMES = {
     "Внутренние переходы": "Внутренние переходы",
     "Переходы из рекомендательных систем": "Рекомендации",
     "Переходы по рекламе": "Реклама",
+    "Переходы из социальных сетей": "Соцсети",
 }
+
+SERVICE_SOURCES = {"Внутренние переходы"}
 
 
 def source_name(value: str) -> str:
@@ -270,7 +346,7 @@ def _mover_line(item: BreakdownChange, label: str, link: str | None = None) -> s
         safe_label = f'<a href="{html.escape(link, quote=True)}">{safe_label}</a>'
     return (
         f"{marker} {safe_label}: {_number(item.current)} ← {_number(item.previous)}"
-        f" · {_signed(item.delta)} ({_signed_percent(item.percent)})"
+        f" · {_signed(item.delta)} ({_breakdown_percent(item)})"
     )
 
 
@@ -295,6 +371,14 @@ def _important(item: BreakdownChange, min_previous: float = 5) -> bool:
     )
 
 
+def _important_source(item: BreakdownChange) -> bool:
+    return bool(
+        abs(item.delta) >= 10
+        and (item.previous >= 20 or item.current >= 20)
+        and (item.percent is None or abs(item.percent) >= 20 or abs(item.delta) >= 25)
+    )
+
+
 def _meaningful(change: Change, min_previous: float, percent: float, absolute: float) -> bool:
     return bool(
         change.percent is not None
@@ -307,7 +391,11 @@ def _meaningful(change: Change, min_previous: float, percent: float, absolute: f
 def insights(data: ReportData) -> list[str]:
     notes: list[str] = []
     source_losses = sorted(
-        (item for item in data.sources if item.delta < 0 and _important(item)),
+        (
+            item
+            for item in data.sources
+            if item.name not in SERVICE_SOURCES and item.delta < 0 and _important_source(item)
+        ),
         key=lambda item: item.delta,
     )
     page_losses = sorted(
@@ -380,7 +468,11 @@ def _report_movers(
     data: ReportData,
 ) -> tuple[list[BreakdownChange], list[BreakdownChange], list[BreakdownChange]]:
     sources = sorted(data.sources, key=lambda item: abs(item.delta), reverse=True)
-    sources = [item for item in sources if abs(item.delta) >= 3][:4]
+    sources = [
+        item
+        for item in sources
+        if item.name not in SERVICE_SOURCES and abs(item.delta) >= 3
+    ][:4]
     losses = sorted(
         (item for item in data.pages if item.delta < 0 and _important(item)),
         key=lambda item: item.delta,
@@ -395,7 +487,13 @@ def _report_movers(
 
 def _rich_delta(item: BreakdownChange) -> str:
     marker = "🟢" if item.delta > 0 else "🔴" if item.delta < 0 else "⚪️"
-    return f"{marker} {_signed(item.delta)} · {_signed_percent(item.percent)}"
+    return f"{marker} {_signed(item.delta)} · {_breakdown_percent(item)}"
+
+
+def _breakdown_percent(item: BreakdownChange) -> str:
+    if item.current == 0 and item.previous == 0:
+        return "0%"
+    return _signed_percent(item.percent)
 
 
 def _rich_change(change: Change) -> str:
@@ -492,15 +590,37 @@ def format_rich_report(data: ReportData) -> str:
     selected_business = [name for name in data.goal_names if goal_relevance(name) > 0]
     selected_auxiliary = [name for name in data.goal_names if goal_relevance(name) == 0]
     if data.goals and selected_business:
+        business_details = [
+            item for item in data.goal_details if goal_relevance(item.name) > 0
+        ]
         goal_rows = [
             (html.escape(item.name), item.previous, item.current, _rich_delta(item))
-            for item in data.goal_details[:5]
+            for item in business_details[:8]
         ]
-        blocks.append(_rich_table("Бизнес-действия", goal_rows, "Цель"))
+        blocks.append(
+            _rich_table(
+                "Целевые визиты",
+                [
+                    (
+                        "Хотя бы одно бизнес-действие",
+                        data.goals.previous,
+                        data.goals.current,
+                        _rich_change(data.goals),
+                    )
+                ],
+                "Итог без дублей",
+            )
+        )
+        if goal_rows:
+            blocks.append(_rich_table("Достижения по целям", goal_rows, "Цель"))
+            blocks.append(
+                "<footer>Один целевой визит может включать несколько достижений; "
+                "в итоговой строке такой визит считается один раз.</footer>"
+            )
         if selected_auxiliary:
             names = ", ".join(f"«{name}»" for name in selected_auxiliary)
             blocks.append(
-                f"<footer>В сумму также входят вспомогательные цели: {html.escape(names)}.</footer>"
+                f"<footer>Не входят в итог как заявки: {html.escape(names)}.</footer>"
             )
     elif data.goal_names:
         names = ", ".join(f"«{name}»" for name in data.goal_names)
@@ -557,12 +677,18 @@ def format_report(data: ReportData, monitor_bot_url: str | None = None) -> str:
     selected_business = [name for name in data.goal_names if goal_relevance(name) > 0]
     selected_auxiliary = [name for name in data.goal_names if goal_relevance(name) == 0]
     if data.goals and selected_business:
-        lines.append(f"Всего: {_change(data.goals)}")
-        for item in data.goal_details[:5]:
+        lines.append(f"Целевые визиты без дублей: {_change(data.goals)}")
+        business_details = [
+            item for item in data.goal_details if goal_relevance(item.name) > 0
+        ]
+        for item in business_details[:8]:
             lines.append(_mover_line(item, item.name))
+        lines.append(
+            "<i>Один визит может достичь нескольких целей; в итоговой строке он считается один раз.</i>"
+        )
         if selected_auxiliary:
             names = ", ".join(f"«{name}»" for name in selected_auxiliary)
-            lines.append(f"ℹ️ В сумму также входят вспомогательные цели: {html.escape(names)}.")
+            lines.append(f"ℹ️ Не входят в итог как заявки: {html.escape(names)}.")
     elif data.goal_names:
         names = ", ".join(f"«{name}»" for name in data.goal_names)
         lines.append(

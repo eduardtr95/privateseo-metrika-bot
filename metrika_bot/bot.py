@@ -58,6 +58,8 @@ class BotService:
                 self._handle_message(update["message"])
             elif "callback_query" in update:
                 self._handle_callback(update["callback_query"])
+            elif "my_chat_member" in update:
+                self._handle_my_chat_member(update["my_chat_member"])
         except (YandexAPIError, TelegramAPIError) as exc:
             chat_id = self._chat_id(update)
             log.warning("Request failed for chat %s: %s", chat_id, exc)
@@ -83,7 +85,17 @@ class BotService:
     def _chat_id(update: dict) -> int | None:
         if "message" in update:
             return update["message"].get("chat", {}).get("id")
+        if "my_chat_member" in update:
+            return update["my_chat_member"].get("chat", {}).get("id")
         return update.get("callback_query", {}).get("message", {}).get("chat", {}).get("id")
+
+    def _handle_my_chat_member(self, membership: dict) -> None:
+        chat = membership.get("chat", {})
+        if chat.get("type") != "private":
+            return
+        status = membership.get("new_chat_member", {}).get("status")
+        if status in {"left", "kicked"}:
+            self.db.delete_user(int(chat["id"]))
 
     def _handle_message(self, message: dict) -> None:
         chat_id = int(message["chat"]["id"])
@@ -125,7 +137,10 @@ class BotService:
             )
         elif command == "/delete_me":
             self.db.delete_user(chat_id)
-            self.telegram.send_message(chat_id, "Ваши настройки и OAuth-токены полностью удалены.")
+            self.telegram.send_message(
+                chat_id,
+                "Ваши настройки, OAuth-токены и технические события полностью удалены.",
+            )
         elif command == "/privacy":
             self.telegram.send_message(
                 chat_id,

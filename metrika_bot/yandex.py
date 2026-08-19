@@ -147,6 +147,7 @@ class YandexClient:
         metrics: list[str],
         dimensions: list[str] | None = None,
         limit: int = 100,
+        filters: str | None = None,
     ) -> dict[str, Any]:
         params: dict[str, Any] = {
             "ids": counter_id,
@@ -159,6 +160,8 @@ class YandexClient:
         }
         if dimensions:
             params["dimensions"] = ",".join(dimensions)
+        if filters:
+            params["filters"] = filters
         return self._api(chat_id, "/stat/v1/data", params)
 
     def _api(self, chat_id: int, path: str, params: dict[str, Any] | None = None) -> dict[str, Any]:

@@ -46,7 +46,7 @@ class TelegramAPI:
     def get_updates(self, offset: int | None) -> list[dict[str, Any]]:
         payload: dict[str, Any] = {
             "timeout": 50,
-            "allowed_updates": ["message", "callback_query"],
+            "allowed_updates": ["message", "callback_query", "my_chat_member"],
         }
         if offset is not None:
             payload["offset"] = offset

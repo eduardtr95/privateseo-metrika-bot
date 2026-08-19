@@ -1,0 +1,11 @@
+[Unit]
+Description=Daily PrivateSEO Metrika bot database backup
+
+[Timer]
+OnCalendar=*-*-* 03:15:00 Europe/Moscow
+Persistent=true
+RandomizedDelaySec=10m
+Unit=privateseo-metrika-backup.service
+
+[Install]
+WantedBy=timers.target
