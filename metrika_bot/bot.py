@@ -10,7 +10,15 @@ from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime
 from zoneinfo import ZoneInfo
 
-from .analysis import ReportBuilder, ReportData, format_report, format_rich_report, goal_relevance
+from .analysis import (
+    ReportBuilder,
+    ReportData,
+    format_compact_report,
+    format_compact_rich_report,
+    format_report,
+    format_rich_report,
+    goal_relevance,
+)
 from .config import Config
 from .db import Database
 from .telegram import TelegramAPI, TelegramAPIError
@@ -334,7 +342,7 @@ class BotService:
             buttons,
         )
 
-    def send_report(self, chat_id: int) -> None:
+    def send_report(self, chat_id: int, detailed: bool = False) -> None:
         connection = self.db.get_connection(chat_id)
         if not connection:
             self._welcome(chat_id)
@@ -347,24 +355,41 @@ class BotService:
         except TelegramAPIError:
             log.debug("Could not send typing action for chat %s", chat_id)
         data = self.reports.collect(chat_id, connection)
-        self._send_formatted_report(chat_id, data, with_buttons=True)
+        self._send_formatted_report(chat_id, data, with_buttons=True, detailed=detailed)
         self.db.event(chat_id, "report_manual", str(connection["counter_id"]))
 
     def _send_formatted_report(
-        self, chat_id: int, data: ReportData, with_buttons: bool = False
+        self,
+        chat_id: int,
+        data: ReportData,
+        with_buttons: bool = False,
+        detailed: bool = False,
     ) -> None:
-        buttons = None
-        if with_buttons:
-            buttons = [
-                [{"text": "Настроить цели", "callback_data": "goals"}],
-                [{"text": "Расписание отчётов", "callback_data": "schedule"}],
-                [{"text": "Другой счётчик", "callback_data": "counters"}],
+        buttons = [
+            [
+                {
+                    "text": "Короткий отчёт" if detailed else "Показать детали",
+                    "callback_data": "week" if detailed else "week:full",
+                }
             ]
+        ]
+        if with_buttons:
+            buttons.extend(
+                [
+                    [
+                        {"text": "Цели", "callback_data": "goals"},
+                        {"text": "Расписание", "callback_data": "schedule"},
+                    ],
+                    [{"text": "Другой счётчик", "callback_data": "counters"}],
+                ]
+            )
         try:
-            self.telegram.send_rich_message(chat_id, format_rich_report(data), buttons)
+            rich_text = format_rich_report(data) if detailed else format_compact_rich_report(data)
+            self.telegram.send_rich_message(chat_id, rich_text, buttons)
         except TelegramAPIError:
             log.warning("Rich message unavailable for chat %s; using HTML fallback", chat_id)
-            self.telegram.send_message(chat_id, format_report(data), buttons)
+            text = format_report(data) if detailed else format_compact_report(data)
+            self.telegram.send_message(chat_id, text, buttons)
 
     def _handle_callback(self, callback: dict) -> None:
         callback_id = str(callback["id"])
@@ -383,6 +408,8 @@ class BotService:
 
         if data == "week":
             self.send_report(chat_id)
+        elif data == "week:full":
+            self.send_report(chat_id, detailed=True)
         elif data == "counters":
             self.send_counters(chat_id)
         elif data == "goals":

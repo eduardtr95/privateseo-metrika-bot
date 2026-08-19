@@ -477,9 +477,7 @@ def _report_movers(
 ) -> tuple[list[BreakdownChange], list[BreakdownChange], list[BreakdownChange]]:
     sources = sorted(data.sources, key=lambda item: abs(item.delta), reverse=True)
     sources = [
-        item
-        for item in sources
-        if item.name not in SERVICE_SOURCES and abs(item.delta) >= 3
+        item for item in sources if item.name not in SERVICE_SOURCES and abs(item.delta) >= 3
     ][:4]
     losses = sorted(
         (item for item in data.pages if item.delta < 0 and _important(item)),
@@ -528,6 +526,119 @@ def _rich_table(
         )
     rendered.append("</table>")
     return "".join(rendered)
+
+
+def _compact_change(change: Change) -> str:
+    marker = "🟢" if change.absolute > 0 else "🔴" if change.absolute < 0 else "⚪️"
+    return f"{marker} {_signed(change.absolute)} ({_signed_percent(change.percent)})"
+
+
+def _compact_mover(item: BreakdownChange) -> str:
+    marker = "🟢" if item.delta > 0 else "🔴" if item.delta < 0 else "⚪️"
+    return f"{_number(item.current)} · {marker} {_signed(item.delta)} ({_breakdown_percent(item)})"
+
+
+def _compact_highlights(data: ReportData) -> list[tuple[str, BreakdownChange, str | None]]:
+    sources, page_losses, page_gains = _report_movers(data)
+    highlights: list[tuple[str, BreakdownChange, str | None]] = []
+    if sources:
+        highlights.append((source_name(sources[0].name), sources[0], None))
+    pages = page_losses or page_gains
+    if pages:
+        highlights.append((_page_label(pages[0].name), pages[0], pages[0].name))
+    return highlights
+
+
+def format_compact_rich_report(data: ReportData) -> str:
+    """Short owner-facing summary; the complete tables are available on demand."""
+    period_word, _, comparison = _period_word(data)
+    blocks = [
+        f"<h2>{html.escape(data.counter_name)}</h2>",
+        f"<p>{_period_text(data.current_period)} {comparison}</p>",
+        f"<h3>Итог за {period_word}</h3>",
+        (
+            f"<p><b>Визиты:</b> {_number(data.visits.current)} · "
+            f"{html.escape(_compact_change(data.visits))}"
+        ),
+    ]
+
+    selected_business = [name for name in data.goal_names if goal_relevance(name) > 0]
+    if data.goals and selected_business:
+        blocks[-1] += (
+            f"<br><b>Целевые визиты:</b> {_number(data.goals.current)} · "
+            f"{html.escape(_compact_change(data.goals))}</p>"
+        )
+    else:
+        blocks[-1] += "</p>"
+        warning = (
+            "Выбраны только вспомогательные цели — они не считаются заявками."
+            if data.goal_names
+            else "Бизнес-цели не выбраны."
+        )
+        blocks.append(f"<blockquote>⚠️ {html.escape(warning)}</blockquote>")
+
+    highlights = _compact_highlights(data)
+    if highlights:
+        items = []
+        for label, item, link in highlights:
+            safe_label = html.escape(label)
+            if link:
+                safe_label = f'<a href="{html.escape(link, quote=True)}">{safe_label}</a>'
+            items.append(f"<li><b>{safe_label}:</b> {html.escape(_compact_mover(item))}</li>")
+        blocks.extend(["<h3>Главное</h3>", f"<ul>{''.join(items)}</ul>"])
+
+    actions = insights(data)[:2]
+    if len(actions) == 1 and actions[0].startswith("Срочных действий нет"):
+        blocks.append(f"<blockquote>✅ {html.escape(actions[0])}</blockquote>")
+    else:
+        items = "".join(f"<li>{html.escape(note)}</li>" for note in actions)
+        blocks.extend(["<h3>Что проверить</h3>", f"<ol>{items}</ol>"])
+
+    if data.sampled:
+        blocks.append("<footer>Данные семплированы: небольшие изменения приблизительны.</footer>")
+    return "".join(blocks)
+
+
+def format_compact_report(data: ReportData) -> str:
+    """HTML fallback for clients where Telegram rich messages are unavailable."""
+    period_word, _, comparison = _period_word(data)
+    lines = [
+        f"<b>{html.escape(data.counter_name)}</b>",
+        f"{_period_text(data.current_period)} {comparison}",
+        "",
+        f"<b>Итог за {period_word}</b>",
+        f"Визиты: {_number(data.visits.current)} · {_compact_change(data.visits)}",
+    ]
+
+    selected_business = [name for name in data.goal_names if goal_relevance(name) > 0]
+    if data.goals and selected_business:
+        lines.append(
+            f"Целевые визиты: {_number(data.goals.current)} · {_compact_change(data.goals)}"
+        )
+    elif data.goal_names:
+        lines.append("⚠️ Выбраны только вспомогательные цели — они не считаются заявками.")
+    else:
+        lines.append("⚠️ Бизнес-цели не выбраны.")
+
+    highlights = _compact_highlights(data)
+    if highlights:
+        lines.extend(["", "<b>Главное</b>"])
+        for label, item, link in highlights:
+            safe_label = html.escape(label)
+            if link:
+                safe_label = f'<a href="{html.escape(link, quote=True)}">{safe_label}</a>'
+            lines.append(f"{safe_label}: {_compact_mover(item)}")
+
+    actions = insights(data)[:2]
+    lines.append("")
+    if len(actions) == 1 and actions[0].startswith("Срочных действий нет"):
+        lines.append(f"✅ {html.escape(actions[0])}")
+    else:
+        lines.append("<b>Что проверить</b>")
+        lines.extend(f"{index}. {html.escape(note)}" for index, note in enumerate(actions, start=1))
+    if data.sampled:
+        lines.extend(["", "<i>Данные семплированы: небольшие изменения приблизительны.</i>"])
+    return "\n".join(lines)[:4096]
 
 
 def format_rich_report(data: ReportData) -> str:
@@ -598,9 +709,7 @@ def format_rich_report(data: ReportData) -> str:
     selected_business = [name for name in data.goal_names if goal_relevance(name) > 0]
     selected_auxiliary = [name for name in data.goal_names if goal_relevance(name) == 0]
     if data.goals and selected_business:
-        business_details = [
-            item for item in data.goal_details if goal_relevance(item.name) > 0
-        ]
+        business_details = [item for item in data.goal_details if goal_relevance(item.name) > 0]
         goal_rows = [
             (html.escape(item.name), item.previous, item.current, _rich_delta(item))
             for item in business_details[:8]
@@ -627,9 +736,7 @@ def format_rich_report(data: ReportData) -> str:
             )
         if selected_auxiliary:
             names = ", ".join(f"«{name}»" for name in selected_auxiliary)
-            blocks.append(
-                f"<footer>Не входят в итог как заявки: {html.escape(names)}.</footer>"
-            )
+            blocks.append(f"<footer>Не входят в итог как заявки: {html.escape(names)}.</footer>")
     elif data.goal_names:
         names = ", ".join(f"«{name}»" for name in data.goal_names)
         blocks.append(
@@ -686,9 +793,7 @@ def format_report(data: ReportData, monitor_bot_url: str | None = None) -> str:
     selected_auxiliary = [name for name in data.goal_names if goal_relevance(name) == 0]
     if data.goals and selected_business:
         lines.append(f"Целевые визиты без дублей: {_change(data.goals)}")
-        business_details = [
-            item for item in data.goal_details if goal_relevance(item.name) > 0
-        ]
+        business_details = [item for item in data.goal_details if goal_relevance(item.name) > 0]
         for item in business_details[:8]:
             lines.append(_mover_line(item, item.name))
         lines.append(

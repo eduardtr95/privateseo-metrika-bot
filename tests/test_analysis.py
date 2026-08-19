@@ -9,6 +9,8 @@ from metrika_bot.analysis import (
     ReportBuilder,
     completed_periods,
     completed_weeks,
+    format_compact_report,
+    format_compact_rich_report,
     format_report,
     format_rich_report,
     goal_relevance,
@@ -80,9 +82,7 @@ def test_three_visit_source_change_is_visible_but_not_an_action():
 
 
 def test_zero_to_zero_goal_is_not_labeled_as_new():
-    text = format_report(
-        report(goal_details=[BreakdownChange("Заявка", 0, 0)], goals=Change(0, 0))
-    )
+    text = format_report(report(goal_details=[BreakdownChange("Заявка", 0, 0)], goals=Change(0, 0)))
     assert "Заявка: 0 ← 0 · 0 (0%)" in text
 
 
@@ -193,16 +193,50 @@ def test_rich_report_uses_native_tables_and_links():
     assert len(text.encode()) <= 32768
 
 
+def test_compact_report_has_no_table_and_only_two_highlights():
+    data = report(
+        sources=[
+            BreakdownChange("Переходы из поисковых систем", 75, 40),
+            BreakdownChange("Прямые заходы", 60, 45),
+        ],
+        pages=[
+            BreakdownChange("https://example.ru/lost", 10, 30),
+            BreakdownChange("https://example.ru/gained", 40, 10),
+        ],
+    )
+    rich = format_compact_rich_report(data)
+    fallback = format_compact_report(data)
+
+    assert "<table" not in rich
+    assert "Визиты:</b> 80" in rich
+    assert "Целевые визиты:</b> 8" in rich
+    assert "Поиск" in rich
+    assert "Страница: lost" in rich
+    assert "Прямые заходы" not in rich
+    assert "Страница: gained" not in rich
+    assert len(fallback.splitlines()) <= 15
+
+
+def test_compact_report_warns_when_business_goals_are_not_selected():
+    data = report(
+        goals=None,
+        goal_names=["Переход в YouTube"],
+        goal_details=[BreakdownChange("Переход в YouTube", 10, 5)],
+    )
+
+    text = format_compact_report(data)
+
+    assert "вспомогательные цели" in text
+    assert "Целевые визиты:" not in text
+
+
 class FakeYandex:
     def __init__(self):
         self.calls = []
 
     def goals(self, chat_id, counter_id):
         del chat_id, counter_id
-        return [
-            {"id": goal_id, "name": f"Заявка {goal_id}"}
-            for goal_id in range(1, 13)
-        ] + [
+        return [{"id": goal_id, "name": f"Заявка {goal_id}"} for goal_id in range(1, 13)] + [
             {"id": 13, "name": "Переход в YouTube"},
             {"id": 14, "name": "Запуск аудита"},
             {"id": 15, "name": "Переход в ТГ-канал"},
@@ -246,9 +280,7 @@ def test_report_uses_unique_business_goal_visits_and_batches_goal_metrics():
     assert data.goals == Change(6, 5)
     assert len(data.goal_details) == 15
     goal_metric_calls = [
-        call
-        for call in yandex.calls
-        if call["metrics"] and call["metrics"][0].endswith("reaches")
+        call for call in yandex.calls if call["metrics"] and call["metrics"][0].endswith("reaches")
     ]
     assert [len(call["metrics"]) for call in goal_metric_calls] == [10, 10, 5, 5]
     assert all(len(call["metrics"]) <= 10 for call in yandex.calls)
