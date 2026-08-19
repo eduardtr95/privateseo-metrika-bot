@@ -73,6 +73,8 @@ class Database:
                 "report_frequency": "TEXT NOT NULL DEFAULT 'weekly'",
                 "report_weekday": "INTEGER NOT NULL DEFAULT 0",
                 "report_hour": "INTEGER NOT NULL DEFAULT 9",
+                "first_start_payload": "TEXT",
+                "first_started_at": "TEXT",
             }
             for name, definition in migrations.items():
                 if name not in user_columns:
@@ -93,6 +95,19 @@ class Database:
     def get_user(self, chat_id: int) -> sqlite3.Row | None:
         with self.connect() as conn:
             return conn.execute("SELECT * FROM users WHERE chat_id = ?", (chat_id,)).fetchone()
+
+    def record_first_start(self, chat_id: int, payload: str) -> bool:
+        with self.connect() as conn:
+            cursor = conn.execute(
+                """UPDATE users
+                SET first_start_payload = ?, first_started_at = ?
+                WHERE chat_id = ? AND first_started_at IS NULL""",
+                (payload, self._now(), chat_id),
+            )
+            if cursor.rowcount:
+                self._event_conn(conn, chat_id, "start", payload)
+                return True
+            return False
 
     def save_oauth_state(self, state: str, chat_id: int, verifier: str) -> None:
         expires = (datetime.now(UTC) + timedelta(minutes=10)).isoformat()

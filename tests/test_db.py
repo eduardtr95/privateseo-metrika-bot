@@ -81,3 +81,19 @@ def test_delete_user_removes_connection_oauth_state_and_events(tmp_path: Path):
     with db.connect() as conn:
         assert conn.execute("SELECT COUNT(*) FROM oauth_states").fetchone()[0] == 0
         assert conn.execute("SELECT COUNT(*) FROM events WHERE chat_id = 123").fetchone()[0] == 0
+
+
+def test_first_start_attribution_is_not_overwritten(tmp_path: Path):
+    db = Database(tmp_path / "bot.sqlite3")
+    db.upsert_user(123, "user")
+
+    assert db.record_first_start(123, "instagram_reels") is True
+    assert db.record_first_start(123, "telegram_post") is False
+
+    user = db.get_user(123)
+    assert user["first_start_payload"] == "instagram_reels"
+    with db.connect() as conn:
+        events = conn.execute(
+            "SELECT details FROM events WHERE chat_id = 123 AND event = 'start'"
+        ).fetchall()
+    assert [row["details"] for row in events] == ["instagram_reels"]

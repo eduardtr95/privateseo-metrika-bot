@@ -3,6 +3,7 @@ from __future__ import annotations
 import html
 import json
 import logging
+import re
 import threading
 import time
 from concurrent.futures import ThreadPoolExecutor
@@ -18,6 +19,7 @@ from .yandex import YandexAPIError, YandexClient
 
 log = logging.getLogger(__name__)
 WEEKDAYS = ("Пн", "Вт", "Ср", "Чт", "Пт", "Сб", "Вс")
+START_PAYLOAD_RE = re.compile(r"[A-Za-z0-9_-]{1,64}")
 
 
 class BotService:
@@ -111,6 +113,12 @@ class BotService:
         command = text.split()[0].split("@")[0].lower() if text.startswith("/") else ""
 
         if command in ("/start", "/connect"):
+            if command == "/start":
+                parts = text.split(maxsplit=1)
+                payload = parts[1] if len(parts) == 2 else "direct"
+                if not START_PAYLOAD_RE.fullmatch(payload):
+                    payload = "direct"
+                self.db.record_first_start(chat_id, payload)
             self._welcome(chat_id)
         elif command == "/week":
             self.send_report(chat_id)
