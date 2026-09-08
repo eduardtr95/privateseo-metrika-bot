@@ -6,8 +6,7 @@ import logging
 import re
 import threading
 import time
-from concurrent.futures import ThreadPoolExecutor
-from datetime import datetime
+from datetime import date, datetime
 from zoneinfo import ZoneInfo
 
 from .analysis import (
@@ -20,6 +19,7 @@ from .analysis import (
     goal_relevance,
 )
 from .config import Config
+from .runtime import KeyedQueue, UserLocks
 from .db import Database
 from .telegram import TelegramAPI, TelegramAPIError
 from .yandex import YandexAPIError, YandexClient
@@ -66,9 +66,60 @@ class BotService:
         self.db = db
         self.telegram = telegram
         self.yandex = yandex
-        self.reports = ReportBuilder(yandex)
+        self.reports = ReportBuilder(yandex, config.report_timezone)
+        self._setup_runtime()
+
+    def _setup_runtime(self):
         self.stop_event = threading.Event()
-        self.executor = ThreadPoolExecutor(max_workers=8, thread_name_prefix="bot-update")
+        self.locks = UserLocks()
+        self.updates = KeyedQueue(4, 64, "bot-control")
+        self.jobs = KeyedQueue(2, 32, "bot-report")
+        self.epochs = {}
+        self.busy_notices = {}
+        self.health_lock = threading.Lock()
+        self.heartbeats = {}
+
+    def heartbeat(self, worker: str):
+        with self.health_lock:
+            self.heartbeats[worker] = time.monotonic()
+
+    def healthy(self) -> bool:
+        with self.health_lock:
+            return not self.stop_event.is_set() and all(
+                name in self.heartbeats and time.monotonic() - self.heartbeats[name] < 180
+                for name in ("polling", "scheduler")
+            )
+
+    def current_connection(self, chat_id: int, generation: str):
+        row = self.db.get_connection(chat_id)
+        return row if row and row["generation"] == generation else None
+
+    def _dispatch_update(self, update: dict):
+        chat_id = self._chat_id(update)
+        if chat_id is None:
+            return
+        message = update.get("message", {})
+        command = str(message.get("text", "")).split(maxsplit=1)[0:1]
+        command = command[0].split("@")[0].lower() if command else ""
+        destructive = command in {"/delete_me", "/disconnect"} or "my_chat_member" in update
+        if destructive:
+            with self.locks.for_user(chat_id):
+                self.epochs[chat_id] = self.epochs.get(chat_id, 0) + 1
+                self.handle_update(update)
+            return
+        epoch = self.epochs.get(chat_id, 0)
+
+        def handle():
+            with self.locks.for_user(chat_id):
+                if self.epochs.get(chat_id, 0) == epoch:
+                    self.handle_update(update)
+
+        if not self.updates.submit(chat_id, handle):
+            callback = update.get("callback_query")
+            if callback:
+                self.telegram.answer_callback(
+                    str(callback["id"]), "Предыдущее действие ещё выполняется"
+                )
 
     def run_polling(self) -> None:
         offset: int | None = None
@@ -76,17 +127,26 @@ class BotService:
             self.telegram.set_commands()
         except TelegramAPIError:
             log.exception("Could not set bot commands")
+        self.heartbeat("polling")
         while not self.stop_event.is_set():
             try:
                 updates = self.telegram.get_updates(offset)
+                self.heartbeat("polling")
                 for update in updates:
                     offset = int(update["update_id"]) + 1
-                    self.executor.submit(self.handle_update, update)
+                    self._dispatch_update(update)
             except TelegramAPIError:
                 log.exception("Telegram polling failed")
                 self.stop_event.wait(5)
 
     def handle_update(self, update: dict) -> None:
+        chat_id = self._chat_id(update)
+        if chat_id is None:
+            return
+        with self.locks.for_user(chat_id):
+            self._handle_update_locked(update)
+
+    def _handle_update_locked(self, update: dict) -> None:
         try:
             if "message" in update:
                 self._handle_message(update["message"])
@@ -97,6 +157,8 @@ class BotService:
         except (YandexAPIError, TelegramAPIError) as exc:
             chat_id = self._chat_id(update)
             log.warning("Request failed for chat %s: %s", chat_id, exc)
+            if chat_id and isinstance(exc, YandexAPIError) and exc.reconnect:
+                self.db.report_failure(chat_id, "auth", 3600, reauth=True)
             if chat_id:
                 self.telegram.send_message(
                     chat_id,
@@ -151,7 +213,7 @@ class BotService:
                 if not START_PAYLOAD_RE.fullmatch(payload):
                     payload = "direct"
                 self.db.record_first_start(chat_id, payload)
-            self._welcome(chat_id)
+            self._welcome(chat_id, force_connect=command == "/connect")
         elif command == "/week":
             self.send_report(chat_id)
         elif command == "/counters":
@@ -170,21 +232,23 @@ class BotService:
             self.db.toggle_reports(chat_id, True)
             self.send_schedule(chat_id)
         elif command == "/disconnect":
+            self.epochs[chat_id] = self.epochs.get(chat_id, 0) + 1
             self.db.disconnect(chat_id)
             self.telegram.send_message(
                 chat_id,
                 "Доступ к Метрике удалён из бота. В Яндекс ID его также можно отозвать в разделе доступов.",
             )
         elif command == "/delete_me":
+            self.epochs[chat_id] = self.epochs.get(chat_id, 0) + 1
             self.db.delete_user(chat_id)
             self.telegram.send_message(
                 chat_id,
-                "Ваши настройки, OAuth-токены и технические события полностью удалены.",
+                "Данные удалены из рабочей базы, новые отчёты остановлены. Резервные копии удаляются в течение 14 дней. Старые сообщения Telegram можно удалить в чате.",
             )
         elif command == "/privacy":
             self.telegram.send_message(
                 chat_id,
-                "<b>Приватность</b>\n\nБот хранит Telegram chat ID, выбранный счётчик, цели и зашифрованные OAuth-токены. Сырые данные Метрики и отчёты не сохраняются. /disconnect удаляет доступ, /delete_me — все ваши данные.",
+                "<b>Приватность</b>\n\nБот хранит Telegram ID и username, источник первого запуска, выбранный счётчик и цели, расписание, зашифрованные токены и технические события. Параметры кнопок отчётов хранятся до 30 дней, события — до 90 дней. Сырые выгрузки и тексты отчётов не сохраняются. /disconnect удаляет доступ и ожидающие подключения, /delete_me — данные из рабочей базы. Резервные копии удаляются в течение 14 дней.",
             )
         elif command == "/feedback":
             self._feedback(chat_id)
@@ -193,12 +257,12 @@ class BotService:
         else:
             self._help(chat_id)
 
-    def _welcome(self, chat_id: int) -> None:
+    def _welcome(self, chat_id: int, force_connect: bool = False) -> None:
         connection = self.db.get_connection(chat_id)
-        if connection:
+        if connection and not force_connect and not connection["reauth_required"]:
             self.telegram.send_message(
                 chat_id,
-                "<b>PrivateSEO Аналитика</b>\n\nМетрика подключена. Я показываю не просто цифры, а существенные изменения: где просел трафик, какие страницы дали рост и что проверить.\n\nЕжедневное или недельное расписание настраивается под вас.",
+                "<b>PrivateSEO Аналитика</b>\n\nМетрика подключена. Я показываю не просто цифры, а существенные изменения: где просел трафик, на каких страницах вырос трафик и что проверить.\n\nЕжедневное или недельное расписание настраивается под вас.",
                 [
                     [{"text": "Показать неделю", "callback_data": "week"}],
                     [{"text": "Настроить расписание", "callback_data": "schedule"}],
@@ -216,7 +280,7 @@ class BotService:
     def _help(self, chat_id: int) -> None:
         self.telegram.send_message(
             chat_id,
-            '<b>Как пользоваться</b>\n\n/week — отчёт сейчас\n/counters — выбрать сайт\n/goals — выбрать заявки и продажи\n/schedule — дни и время отчётов\n/pause — выключить автодайджест\n/resume — включить обратно\n/disconnect — удалить доступ к Метрике\n/privacy — какие данные хранятся\n/feedback — вопросы и предложения\n\n<b>Обратная связь</b>\nНашли ошибку, чего-то не хватает или есть идея? Напишите Эдуарду: <a href="https://t.me/eduardtr95">@eduardtr95</a>.\n\n<b>Другие продукты PrivateSEO</b>\n'
+            '<b>Как пользоваться</b>\n\n/week — отчёт за 7 полных дней\n/connect — подключить или обновить доступ\n/counters — выбрать сайт\n/goals — выбрать заявки и продажи\n/schedule — дни и время отчётов\n/pause — выключить автодайджест\n/resume — включить обратно\n/disconnect — удалить доступ к Метрике\n/privacy — какие данные хранятся\n/delete_me — удалить свои данные\n/feedback — вопросы и предложения\n\n<b>Обратная связь</b>\nНашли ошибку, чего-то не хватает или есть идея? Напишите Эдуарду: <a href="https://t.me/eduardtr95">@eduardtr95</a>.\n\n<b>Другие продукты PrivateSEO</b>\n'
             '🌐 <a href="https://private-seo.ru/?utm_source=telegram&amp;utm_medium=bot&amp;utm_campaign=metrika_bot&amp;utm_content=help">Сайт SEO- и GEO-агентства</a>\n'
             '🧩 <a href="https://chromewebstore.google.com/detail/privateseo-ai-auditor-seo/nblbceehggefmhkioijdbppdboimoicg">PrivateSEO AI Auditor для Chrome</a>\n'
             "🟢 Следить за падениями, SSL, noindex и robots.txt: "
@@ -290,73 +354,226 @@ class BotService:
         else:
             self.telegram.edit_message_text(chat_id, message_id, text, buttons)
 
-    def send_counters(self, chat_id: int) -> None:
+    def send_counters(self, chat_id: int, page: int = 0) -> None:
+        connection = self.db.get_connection(chat_id)
+        if not connection or connection["reauth_required"]:
+            self._welcome(chat_id, force_connect=True)
+            return
         counters = self.yandex.counters(chat_id)
         if not counters:
             self.telegram.send_message(
-                chat_id, "В подключённом аккаунте нет доступных счётчиков Метрики."
+                chat_id, "В этом аккаунте нет счётчиков. Подключить другой: /connect"
             )
             return
-        buttons = []
-        visible = counters[:40]
-        for counter, label in zip(visible, counter_button_labels(visible), strict=True):
-            buttons.append([{"text": label, "callback_data": f"counter:{counter['id']}"}])
-        self.telegram.send_message(chat_id, "Выберите сайт, по которому нужен отчёт:", buttons)
+        page = max(0, min(page, (len(counters) - 1) // 20))
+        gen = connection["generation"]
+        visible = counters[page * 20 : (page + 1) * 20]
+        buttons = [
+            [{"text": label, "callback_data": f"c:{gen}:{item['id']}"}]
+            for item, label in zip(visible, counter_button_labels(visible), strict=True)
+        ]
+        buttons.extend(self._pager(page, len(counters), f"cp:{gen}"))
+        self.telegram.send_message(
+            chat_id,
+            f"Выберите сайт · страница {page + 1} из {(len(counters) - 1) // 20 + 1}:",
+            buttons,
+        )
 
-    def send_goals(self, chat_id: int) -> None:
+    @staticmethod
+    def _pager(page: int, total: int, prefix: str):
+        buttons = []
+        if page > 0:
+            buttons.append({"text": "← Назад", "callback_data": f"{prefix}:{page - 1}"})
+        if (page + 1) * 20 < total:
+            buttons.append({"text": "Далее →", "callback_data": f"{prefix}:{page + 1}"})
+        return [buttons] if buttons else []
+
+    def send_goals(self, chat_id: int, page: int = 0, message_id: int | None = None) -> None:
         connection = self.db.get_connection(chat_id)
         if not connection or not connection["counter_id"]:
             self.telegram.send_message(chat_id, "Сначала выберите счётчик: /counters")
             return
         goals = self.yandex.goals(chat_id, int(connection["counter_id"]))
         selected = set(json.loads(connection["goal_ids"] or "[]"))
-        if not goals:
-            self.telegram.send_message(chat_id, "В этом счётчике пока нет целей.")
-            return
-        buttons = []
         goals = sorted(
             goals,
-            key=lambda goal: (
-                -goal_relevance(str(goal.get("name") or "")),
-                str(goal.get("name") or "").casefold(),
+            key=lambda g: (
+                -goal_relevance(str(g.get("name") or "")),
+                str(g.get("name") or "").casefold(),
+                int(g["id"]),
             ),
         )
-        for goal in goals[:40]:
+        page = max(0, min(page, max(0, (len(goals) - 1) // 20)))
+        gen = connection["generation"]
+        buttons = []
+        for goal in goals[page * 20 : (page + 1) * 20]:
             goal_id = int(goal["id"])
             mark = "✅" if goal_id in selected else "▫️"
             name = str(goal.get("name") or goal_id)
-            recommended = "⭐ " if goal_relevance(name) > 0 else ""
+            star = "⭐ " if goal_relevance(name) > 0 else ""
             buttons.append(
-                [{"text": f"{mark} {recommended}{name}"[:55], "callback_data": f"goal:{goal_id}"}]
+                [
+                    {
+                        "text": f"{mark} {star}{name}"[:55],
+                        "callback_data": f"g:{gen}:{page}:{goal_id}",
+                    }
+                ]
+            )
+        buttons.extend(self._pager(page, len(goals), f"gp:{gen}"))
+        if goals:
+            buttons.append(
+                [
+                    {"text": "⭐ Рекомендуемые", "callback_data": f"ga:{gen}:{page}:rec"},
+                    {"text": "Снять всё", "callback_data": f"ga:{gen}:{page}:clear"},
+                ]
             )
         buttons.append(
             [
-                {"text": "⭐ Выбрать рекомендуемые", "callback_data": "goals:recommended"},
-                {"text": "Снять всё", "callback_data": "goals:clear"},
+                {
+                    "text": "Готово — показать отчёт" if goals else "Показать трафик без целей",
+                    "callback_data": f"ready:{gen}",
+                }
             ]
         )
-        buttons.append([{"text": "Готово — показать отчёт", "callback_data": "week"}])
-        self.telegram.send_message(
-            chat_id,
-            "Выберите бизнес-действия: заявки, звонки, покупки и чат. ⭐ — рекомендуемые цели. Повторное нажатие снимает выбор.",
-            buttons,
+        text = (
+            f"<b>Цели · {html.escape(str(connection['counter_name']))}</b>\n\n"
+            f"Выбрано {len(selected)} из 15. Все отмеченные цели входят в итог без дублей. "
+            "⭐ — только рекомендация: оставьте действия, важные для вашего сайта.\n"
+            f"Страница {page + 1} из {max(1, (len(goals) - 1) // 20 + 1)}."
         )
+        if not goals:
+            text += "\nВ счётчике пока нет целей; отчёт по трафику доступен."
+        if message_id is None:
+            self.telegram.send_message(chat_id, text, buttons)
+        else:
+            self.telegram.edit_message_text(chat_id, message_id, text, buttons)
 
-    def send_report(self, chat_id: int, detailed: bool = False) -> None:
-        connection = self.db.get_connection(chat_id)
-        if not connection:
-            self._welcome(chat_id)
-            return
-        if not connection["counter_id"]:
-            self.send_counters(chat_id)
-            return
+    def send_report(
+        self,
+        chat_id: int,
+        detailed: bool = False,
+        *,
+        context_id: str | None = None,
+        days: int = 7,
+        today: date | None = None,
+        scheduled_key: str | None = None,
+    ) -> bool:
+        with self.locks.for_user(chat_id):
+            row = self.db.get_connection(chat_id)
+            if not row or row["reauth_required"]:
+                if not scheduled_key:
+                    self._welcome(chat_id, force_connect=True)
+                return False
+            connection = dict(row)
+            if not connection["counter_id"]:
+                self.send_counters(chat_id)
+                return False
+            today = today or datetime.now(ZoneInfo(self.config.report_timezone)).date()
+            if context_id:
+                context = self.db.report_context(chat_id, context_id)
+                if not context or context["generation"] != connection["generation"]:
+                    self.telegram.send_message(
+                        chat_id,
+                        "Этот отчёт относится к прежнему подключению или устарел. Новый отчёт: /week",
+                    )
+                    return False
+                params = json.loads(context["payload"])
+                connection.update(params["connection"])
+                today, days = date.fromisoformat(params["today"]), int(params["days"])
+            if not scheduled_key:
+                try:
+                    self.telegram.send_chat_action(chat_id)
+                except TelegramAPIError:
+                    pass
+
+            def work():
+                self._run_report(
+                    chat_id, connection, today, days, detailed, scheduled_key, context_id
+                )
+
+            accepted = self.jobs.submit(chat_id, work)
+            if not accepted and not scheduled_key:
+                now = time.monotonic()
+                if now - self.busy_notices.get(chat_id, 0) > 10:
+                    self.busy_notices[chat_id] = now
+                    self.telegram.send_message(
+                        chat_id,
+                        "Отчёт уже собирается или очередь занята. Подождите немного — повторные нажатия не нужны.",
+                    )
+            return accepted
+
+    def _run_report(self, chat_id, connection, today, days, detailed, scheduled_key, context_id):
+        generation = connection["generation"]
+        with self.locks.for_user(chat_id):
+            if self.stop_event.is_set() or not self.current_connection(chat_id, generation):
+                return
         try:
-            self.telegram.send_chat_action(chat_id)
-        except TelegramAPIError:
-            log.debug("Could not send typing action for chat %s", chat_id)
-        data = self.reports.collect(chat_id, connection)
-        self._send_formatted_report(chat_id, data, with_buttons=True, detailed=detailed)
-        self.db.event(chat_id, "report_manual", str(connection["counter_id"]))
+            with self.yandex.report_scope(chat_id, generation):
+                data = self.reports.collect(chat_id, connection, today=today, days=days)
+            with self.locks.for_user(chat_id):
+                if self.stop_event.is_set() or not self.current_connection(chat_id, generation):
+                    return
+                if scheduled_key:
+                    user = self.db.get_user(chat_id)
+                    if (
+                        not user
+                        or not user["report_enabled"]
+                        or user["last_report_key"] == scheduled_key
+                    ):
+                        return
+                    now = datetime.now(ZoneInfo(self.config.report_timezone))
+                    if self._due_key(user, now) != (scheduled_key, days):
+                        return
+                if not context_id:
+                    context_id = self.db.save_report_context(
+                        chat_id,
+                        generation,
+                        {
+                            "connection": {
+                                key: connection[key]
+                                for key in ("counter_id", "counter_name", "goal_ids")
+                            },
+                            "today": today.isoformat(),
+                            "days": days,
+                        },
+                    )
+                self._send_formatted_report(
+                    chat_id, data, with_buttons=True, detailed=detailed, context_id=context_id
+                )
+                if scheduled_key:
+                    self.db.mark_report_sent(chat_id, scheduled_key)
+                else:
+                    self.db.clear_report_failure(chat_id)
+                self.db.event(
+                    chat_id,
+                    "report_scheduled" if scheduled_key else "report_manual",
+                    scheduled_key or str(connection["counter_id"]),
+                )
+        except Exception as exc:
+            log.warning("Report failed (%s)", type(exc).__name__)
+            with self.locks.for_user(chat_id):
+                if self.stop_event.is_set() or not self.current_connection(chat_id, generation):
+                    return
+                auth = isinstance(exc, YandexAPIError) and exc.reconnect
+                notice = "auth" if auth else "temporary-" + today.isoformat()
+                retry = max(300, getattr(exc, "retry_after", 0))
+                notify = self.db.report_failure(chat_id, notice, retry, reauth=auth)
+                if not scheduled_key or notify:
+                    text = (
+                        "Доступ к Метрике нужно обновить: /connect"
+                        if auth
+                        else "Отчёт пока не получился. Автоматическую отправку повторю позже; вручную — /week."
+                    )
+                    if not scheduled_key:
+                        text = (
+                            str(exc)
+                            if isinstance(exc, YandexAPIError)
+                            else "Отчёт пока не получился. Попробуйте через несколько минут: /week"
+                        )
+                    try:
+                        self.telegram.send_message(chat_id, text)
+                    except TelegramAPIError:
+                        pass
 
     def _send_formatted_report(
         self,
@@ -364,15 +581,20 @@ class BotService:
         data: ReportData,
         with_buttons: bool = False,
         detailed: bool = False,
+        context_id: str | None = None,
     ) -> None:
-        buttons = [
+        buttons = (
             [
-                {
-                    "text": "Короткий отчёт" if detailed else "Показать детали",
-                    "callback_data": "week" if detailed else "week:full",
-                }
+                [
+                    {
+                        "text": "Короткий отчёт" if detailed else "Показать детали",
+                        "callback_data": f"r:{context_id}:{'short' if detailed else 'full'}",
+                    }
+                ]
             ]
-        ]
+            if context_id
+            else []
+        )
         if with_buttons:
             buttons.extend(
                 [
@@ -383,11 +605,12 @@ class BotService:
                     [{"text": "Другой счётчик", "callback_data": "counters"}],
                 ]
             )
+        rich_text = format_rich_report(data) if detailed else format_compact_rich_report(data)
         try:
-            rich_text = format_rich_report(data) if detailed else format_compact_rich_report(data)
+            if len(rich_text.encode("utf-8")) > 32768:
+                raise TelegramAPIError("Rich text too large")
             self.telegram.send_rich_message(chat_id, rich_text, buttons)
         except TelegramAPIError:
-            log.warning("Rich message unavailable for chat %s; using HTML fallback", chat_id)
             text = format_report(data) if detailed else format_compact_report(data)
             self.telegram.send_message(chat_id, text, buttons)
 
@@ -397,19 +620,24 @@ class BotService:
         if callback["message"]["chat"].get("type") != "private":
             self.telegram.answer_callback(callback_id, "Настройки доступны только в личном чате")
             return
-        username = callback.get("from", {}).get("username")
-        self.db.upsert_user(chat_id, username)
+        self.db.upsert_user(chat_id, callback.get("from", {}).get("username"))
         data = str(callback.get("data") or "")
-        delayed_answer = (
-            data.startswith("goal:") or data.startswith("goals:") or data.startswith("schedule:")
-        )
-        if not delayed_answer:
-            self.telegram.answer_callback(callback_id)
-
+        if data.startswith(("goal:", "goals:", "counter:")) or data == "week:full":
+            self.telegram.answer_callback(
+                callback_id, "Кнопки устарели. Откройте новые настройки или /week"
+            )
+            self.telegram.send_message(
+                chat_id,
+                "Это кнопки прежней версии. Откройте /goals, /counters или новый отчёт /week.",
+            )
+            return
+        self.telegram.answer_callback(callback_id)
         if data == "week":
             self.send_report(chat_id)
-        elif data == "week:full":
-            self.send_report(chat_id, detailed=True)
+        elif data.startswith("r:"):
+            parts = data.split(":")
+            if len(parts) == 3 and parts[2] in {"short", "full"}:
+                self.send_report(chat_id, detailed=parts[2] == "full", context_id=parts[1])
         elif data == "counters":
             self.send_counters(chat_id)
         elif data == "goals":
@@ -433,107 +661,118 @@ class BotService:
                 self.db.set_report_schedule(chat_id, hour=hour)
             self.send_schedule(chat_id, int(callback["message"]["message_id"]))
             self.telegram.answer_callback(callback_id, "Расписание обновлено")
-        elif data.startswith("counter:"):
-            counter_id = int(data.split(":", 1)[1])
-            counters = self.yandex.counters(chat_id)
-            match = next((item for item in counters if int(item["id"]) == counter_id), None)
-            if not match:
-                raise YandexAPIError("Счётчик больше не доступен")
-            name = str(match.get("name") or match.get("site") or counter_id)
-            self.db.select_counter(chat_id, counter_id, name)
-            goals = self.yandex.goals(chat_id, counter_id)
-            recommended = [
-                int(goal["id"]) for goal in goals if goal_relevance(str(goal.get("name") or "")) > 0
-            ][:15]
-            self.db.set_goals(chat_id, recommended)
-            self.db.event(chat_id, "counter_selected", str(counter_id))
-            self.telegram.send_message(chat_id, f"Выбран счётчик: <b>{html.escape(name)}</b>")
-            if recommended:
+        elif data.split(":", 1)[0] in {"c", "cp", "g", "gp", "ga", "ready"}:
+            parts = data.split(":")
+            connection = self.db.get_connection(chat_id)
+            if len(parts) < 2 or not connection or parts[1] != connection["generation"]:
                 self.telegram.send_message(
                     chat_id,
-                    "Я заранее отметил цели, похожие на заявки и обращения. Проверьте список — выбор можно изменить.",
+                    "Сайт или подключение изменились. Откройте актуальные настройки: /counters или /goals.",
                 )
-            self.send_goals(chat_id)
-        elif data.startswith("goal:"):
-            goal_id = int(data.split(":", 1)[1])
-            connection = self.db.get_connection(chat_id)
-            if not connection:
-                self.telegram.answer_callback(callback_id, "Сначала подключите Метрику")
-                self._welcome(chat_id)
                 return
-            selected, added = self.db.toggle_goal(chat_id, goal_id)
-            if added is None:
-                self.telegram.answer_callback(callback_id, "Можно выбрать не больше 15 целей")
-                return
-            self._update_goal_message(callback, set(selected))
-            self.telegram.answer_callback(callback_id, "Цель добавлена" if added else "Цель убрана")
-        elif data in {"goals:recommended", "goals:clear"}:
-            buttons = callback["message"].get("reply_markup", {}).get("inline_keyboard", [])
-            recommended = []
-            if data == "goals:recommended":
-                for row in buttons:
-                    for button in row:
-                        value = str(button.get("callback_data") or "")
-                        if value.startswith("goal:") and "⭐" in str(button.get("text") or ""):
-                            recommended.append(int(value.split(":", 1)[1]))
-            selected = set(recommended[:15])
-            self.db.set_goals(chat_id, list(selected))
-            self._update_goal_message(callback, selected)
-            response = "Рекомендуемые цели выбраны" if selected else "Все цели сняты"
-            self.telegram.answer_callback(callback_id, response)
+            action = parts[0]
+            if action == "ready":
+                self.send_report(chat_id)
+            elif action == "cp":
+                self.send_counters(chat_id, int(parts[2]))
+            elif action == "c":
+                counter_id = int(parts[2])
+                counters = self.yandex.counters(chat_id)
+                match = next((c for c in counters if int(c["id"]) == counter_id), None)
+                if not match:
+                    raise YandexAPIError("Счётчик больше не доступен. Выберите другой: /counters")
+                self.db.select_counter(
+                    chat_id, counter_id, str(match.get("name") or match.get("site") or counter_id)
+                )
+                self.db.clear_report_failure(chat_id)
+                goals = self.yandex.goals(chat_id, counter_id)
+                recommended = [
+                    int(g["id"])
+                    for g in sorted(goals, key=lambda g: -goal_relevance(str(g.get("name") or "")))
+                    if goal_relevance(str(g.get("name") or "")) > 0
+                ][:15]
+                self.db.set_goals(chat_id, recommended)
+                self.db.event(chat_id, "counter_selected", str(counter_id))
+                self.send_goals(chat_id)
+            else:
+                page = int(parts[2])
+                if action != "gp":
+                    goals = self.yandex.goals(chat_id, int(connection["counter_id"]))
+                    valid = {int(g["id"]) for g in goals}
+                    if action == "g":
+                        goal_id = int(parts[3])
+                        if goal_id not in valid:
+                            self.telegram.send_message(
+                                chat_id, "Эта цель больше не доступна. Обновите список: /goals"
+                            )
+                            return
+                        _, added = self.db.toggle_goal(chat_id, goal_id)
+                        if added is None:
+                            self.telegram.send_message(
+                                chat_id, "Можно выбрать не больше 15 целей. Снимите лишнюю цель."
+                            )
+                            return
+                    elif action == "ga":
+                        selected = (
+                            [
+                                int(g["id"])
+                                for g in sorted(
+                                    goals, key=lambda g: -goal_relevance(str(g.get("name") or ""))
+                                )
+                                if goal_relevance(str(g.get("name") or "")) > 0
+                            ][:15]
+                            if parts[3] == "rec"
+                            else []
+                        )
+                        self.db.set_goals(chat_id, selected)
+                self.send_goals(chat_id, page, int(callback["message"]["message_id"]))
 
-    def _update_goal_message(self, callback: dict, selected: set[int]) -> None:
-        message = callback["message"]
-        buttons = message.get("reply_markup", {}).get("inline_keyboard", [])
-        for row in buttons:
-            for button in row:
-                value = str(button.get("callback_data") or "")
-                if not value.startswith("goal:"):
-                    continue
-                goal_id = int(value.split(":", 1)[1])
-                label = str(button.get("text") or "")
-                for prefix in ("✅ ", "▫️ "):
-                    if label.startswith(prefix):
-                        label = label[len(prefix) :]
-                        break
-                mark = "✅" if goal_id in selected else "▫️"
-                button["text"] = f"{mark} {label}"[:55]
-        self.telegram.edit_message_reply_markup(
-            int(message["chat"]["id"]), int(message["message_id"]), buttons
-        )
+    @staticmethod
+    def _due_key(user, now):
+        if not user["report_enabled"] or now.hour < int(user["report_hour"]):
+            return None
+        if user["report_frequency"] == "daily":
+            return f"D-{now.date().isoformat()}", 1
+        if now.weekday() != int(user["report_weekday"]):
+            return None
+        return f"W-{now.isocalendar().year}-{now.isocalendar().week:02d}", 7
+
+    def scheduler_tick(self):
+        now = datetime.now(ZoneInfo(self.config.report_timezone))
+        self.db.cleanup()
+        for row in self.db.scheduled_users():
+            if self.stop_event.is_set():
+                break
+            due = self._due_key(row, now)
+            if due and row["last_report_key"] != due[0]:
+                self.send_report(
+                    int(row["chat_id"]), days=due[1], today=now.date(), scheduled_key=due[0]
+                )
 
     def run_scheduler(self) -> None:
-        timezone = ZoneInfo(self.config.report_timezone)
+        self.heartbeat("scheduler")
         while not self.stop_event.is_set():
-            now = datetime.now(timezone)
-            for row in self.db.scheduled_users():
-                if self.stop_event.is_set():
-                    break
-                frequency = str(row["report_frequency"] or "weekly")
-                scheduled_hour = int(row["report_hour"])
-                if now.hour < scheduled_hour:
-                    continue
-                if frequency == "daily":
-                    report_key = f"D-{now.date().isoformat()}"
-                    days = 1
-                else:
-                    if now.weekday() != int(row["report_weekday"]):
-                        continue
-                    report_key = f"W-{now.isocalendar().year}-{now.isocalendar().week:02d}"
-                    days = 7
-                if str(row["last_report_key"] or "") == report_key:
-                    continue
-                chat_id = int(row["chat_id"])
-                try:
-                    data = self.reports.collect(chat_id, row, today=now.date(), days=days)
-                    self._send_formatted_report(chat_id, data)
-                    self.db.mark_report_sent(chat_id, report_key)
-                    self.db.event(chat_id, "report_scheduled", report_key)
-                except Exception:
-                    log.exception("Scheduled report failed for chat %s", chat_id)
-                time.sleep(1)
+            try:
+                self.scheduler_tick()
+                self.heartbeat("scheduler")
+            except Exception:
+                log.exception("Scheduler cycle failed; will retry")
             self.stop_event.wait(60)
+
+    def complete_oauth(self, stored, tokens) -> bool:
+        chat_id = int(stored["chat_id"])
+        with self.locks.for_user(chat_id):
+            user = self.db.get_user(chat_id)
+            if not user or user["epoch"] != stored["user_epoch"]:
+                return False
+            self.yandex.save_tokens(chat_id, tokens)
+            self.db.clear_report_failure(chat_id)
+            self.db.event(chat_id, "oauth_connected")
+            self.telegram.send_message(chat_id, "✅ Метрика подключена. Теперь выберите сайт:")
+            self.send_counters(chat_id)
+            return True
 
     def stop(self) -> None:
         self.stop_event.set()
-        self.executor.shutdown(wait=False, cancel_futures=True)
+        self.updates.stop()
+        self.jobs.stop()

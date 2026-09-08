@@ -42,7 +42,12 @@ def main() -> None:
 
     signal.signal(signal.SIGTERM, stop)
     signal.signal(signal.SIGINT, stop)
-    stopping.wait()
+    try:
+        while not stopping.wait(5):
+            if any(not thread.is_alive() for thread in threads):
+                raise RuntimeError("A bot worker stopped; supervisor restart required")
+    finally:
+        service.stop()
 
 
 if __name__ == "__main__":

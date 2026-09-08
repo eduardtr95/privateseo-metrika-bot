@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import html
 import logging
+import threading
 import urllib.parse
 from http import HTTPStatus
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
@@ -18,7 +19,12 @@ def make_handler(service: BotService) -> type[BaseHTTPRequestHandler]:
         def do_GET(self) -> None:  # noqa: N802
             parsed = urllib.parse.urlparse(self.path)
             if parsed.path == "/health":
-                self._reply(HTTPStatus.OK, "ok", "text/plain; charset=utf-8")
+                healthy = service.healthy()
+                self._reply(
+                    HTTPStatus.OK if healthy else HTTPStatus.SERVICE_UNAVAILABLE,
+                    "ok" if healthy else "degraded",
+                    "text/plain; charset=utf-8",
+                )
                 return
             if parsed.path != "/oauth/callback":
                 self._reply(HTTPStatus.NOT_FOUND, "not found", "text/plain; charset=utf-8")
@@ -28,6 +34,7 @@ def make_handler(service: BotService) -> type[BaseHTTPRequestHandler]:
             code = (query.get("code") or [""])[0]
             error = (query.get("error_description") or query.get("error") or [""])[0]
             if error:
+                service.db.consume_oauth_state(state)
                 self._page(HTTPStatus.BAD_REQUEST, "Доступ не предоставлен", error)
                 return
             stored = service.db.consume_oauth_state(state)
@@ -38,16 +45,16 @@ def make_handler(service: BotService) -> type[BaseHTTPRequestHandler]:
                     "Вернитесь в Telegram и нажмите «Подключить Метрику» ещё раз.",
                 )
                 return
-            chat_id = int(stored["chat_id"])
             try:
                 tokens = service.yandex.exchange_code(code, str(stored["code_verifier"]))
-                service.yandex.save_tokens(chat_id, tokens)
-                service.db.event(chat_id, "oauth_connected")
-                service.telegram.send_message(
-                    chat_id,
-                    "✅ Метрика подключена. Теперь выберите сайт:",
-                )
-                service.send_counters(chat_id)
+                if not service.complete_oauth(stored, tokens):
+                    self._page(
+                        HTTPStatus.BAD_REQUEST,
+                        "Подключение отменено",
+                        "Запрос уже отменён или заменён. Вернитесь в Telegram и подключитесь заново.",
+                    )
+                    return
+
             except Exception as exc:
                 log.exception("OAuth callback failed")
                 detail = (
@@ -94,8 +101,38 @@ def make_handler(service: BotService) -> type[BaseHTTPRequestHandler]:
     return Handler
 
 
+class LimitedHTTPServer(ThreadingHTTPServer):
+    daemon_threads = True
+
+    def __init__(self, *args, **kwargs):
+        self.slots = threading.BoundedSemaphore(16)
+        super().__init__(*args, **kwargs)
+
+    def process_request(self, request, address):
+        request.settimeout(10)
+        if not self.slots.acquire(blocking=False):
+            try:
+                request.sendall(
+                    b"HTTP/1.1 503 Service Unavailable\r\nContent-Length: 0\r\nConnection: close\r\n\r\n"
+                )
+            finally:
+                self.shutdown_request(request)
+            return
+        try:
+            super().process_request(request, address)
+        except Exception:
+            self.slots.release()
+            raise
+
+    def process_request_thread(self, request, address):
+        try:
+            super().process_request_thread(request, address)
+        finally:
+            self.slots.release()
+
+
 def serve(service: BotService) -> None:
-    server = ThreadingHTTPServer(
+    server = LimitedHTTPServer(
         (service.config.http_host, service.config.http_port), make_handler(service)
     )
     server.serve_forever()

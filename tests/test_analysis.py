@@ -169,8 +169,8 @@ def test_real_report_explains_hidden_search_loss_and_bad_goal():
     assert "Посадочные страницы: наибольший рост" in text
     assert "До 3 страниц в каждом блоке" in text
     assert "от 10 визитов независимо от процента" in text
-    assert "до 500 самых посещаемых страниц" in text
-    assert "Переход в YouTube" in text and "это не заявка" in text
+    assert "до 5 000 страниц каждого периода" in text
+    assert "Переход в YouTube" in text and "это не заявка" not in text
     assert "Существенных изменений" not in text
 
 
@@ -214,10 +214,10 @@ def test_compact_report_has_no_table_and_only_two_highlights():
     assert "Страница: lost" in rich
     assert "Прямые заходы" not in rich
     assert "Страница: gained" not in rich
-    assert len(fallback.splitlines()) <= 15
+    assert len(fallback.splitlines()) <= 18
 
 
-def test_compact_report_warns_when_business_goals_are_not_selected():
+def test_compact_report_warns_when_selected_goal_data_is_unavailable():
     data = report(
         goals=None,
         goal_names=["Переход в YouTube"],
@@ -226,7 +226,7 @@ def test_compact_report_warns_when_business_goals_are_not_selected():
 
     text = format_compact_report(data)
 
-    assert "вспомогательные цели" in text
+    assert "Не удалось получить данные выбранных целей" in text
     assert "Целевые визиты:" not in text
 
 
@@ -265,7 +265,7 @@ class FakeYandex:
         return {"totals": [1 if current else 0] * len(metrics)}
 
 
-def test_report_uses_unique_business_goal_visits_and_batches_goal_metrics():
+def test_report_uses_all_selected_goals_unique_visits_and_batches_goal_metrics():
     yandex = FakeYandex()
     data = ReportBuilder(yandex).collect(
         123,
@@ -287,10 +287,10 @@ def test_report_uses_unique_business_goal_visits_and_batches_goal_metrics():
     goal_filters = [call["filters"] for call in yandex.calls if call["filters"]]
     assert len(goal_filters) == 2
     assert "goal12IsReached" in goal_filters[0]
-    assert "goal13IsReached" not in goal_filters[0]
+    assert "goal13IsReached" in goal_filters[0]
 
 
-def test_report_labels_unique_visits_and_excludes_auxiliary_goals_from_total():
+def test_report_labels_unique_visits_and_honors_all_selected_goals():
     text = format_report(
         report(
             goals=Change(6, 5),
@@ -303,4 +303,5 @@ def test_report_labels_unique_visits_and_excludes_auxiliary_goals_from_total():
     )
     assert "Целевые визиты без дублей: 6 ← 5 · +20%" in text
     assert "Один визит может достичь нескольких целей" in text
-    assert "Не входят в итог как заявки: «Переход в YouTube»" in text
+    assert "Не входят в итог" not in text
+    assert "Переход в YouTube" in text

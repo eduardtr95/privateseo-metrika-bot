@@ -127,7 +127,7 @@ def test_duplicate_counter_names_are_disambiguated_by_site_or_id():
     ]
 
 
-def test_full_report_callback_requests_detailed_view(tmp_path: Path):
+def test_legacy_full_report_callback_requires_fresh_report(tmp_path: Path):
     db = Database(tmp_path / "bot.sqlite3")
     service = object.__new__(BotService)
     service.db = db
@@ -144,7 +144,8 @@ def test_full_report_callback_requests_detailed_view(tmp_path: Path):
         }
     )
 
-    assert calls == [(123, True)]
+    assert calls == []
+    assert "прежней версии" in service.telegram.messages[-1][0][1]
 
 
 class ReportTelegramStub(TelegramStub):
@@ -171,8 +172,8 @@ def test_default_report_is_compact_and_links_to_details():
         pages=[BreakdownChange("https://example.ru/service", 20, 30)],
     )
 
-    service._send_formatted_report(123, data, with_buttons=True)
+    service._send_formatted_report(123, data, with_buttons=True, context_id="snapshot")
 
     _, text, buttons = service.telegram.rich_messages[0]
     assert "<table" not in text
-    assert buttons[0][0] == {"text": "Показать детали", "callback_data": "week:full"}
+    assert buttons[0][0] == {"text": "Показать детали", "callback_data": "r:snapshot:full"}

@@ -8,6 +8,8 @@ import urllib.request
 from pathlib import Path
 from typing import Any
 
+from .formatting import fit_html
+
 
 log = logging.getLogger(__name__)
 
@@ -60,7 +62,7 @@ class TelegramAPI:
     ) -> None:
         payload: dict[str, Any] = {
             "chat_id": chat_id,
-            "text": text,
+            "text": fit_html(text),
             "parse_mode": "HTML",
             "disable_web_page_preview": True,
         }
@@ -110,16 +112,20 @@ class TelegramAPI:
         text: str,
         buttons: list[list[dict[str, str]]],
     ) -> None:
-        self.call(
-            "editMessageText",
-            {
-                "chat_id": chat_id,
-                "message_id": message_id,
-                "text": text,
-                "parse_mode": "HTML",
-                "reply_markup": {"inline_keyboard": buttons},
-            },
-        )
+        try:
+            self.call(
+                "editMessageText",
+                {
+                    "chat_id": chat_id,
+                    "message_id": message_id,
+                    "text": fit_html(text),
+                    "parse_mode": "HTML",
+                    "reply_markup": {"inline_keyboard": buttons},
+                },
+            )
+        except TelegramAPIError as exc:
+            if "message is not modified" not in str(exc).lower():
+                raise
 
     def set_profile_texts(self) -> None:
         self.call("setMyName", {"name": "PrivateSEO Аналитика"})
@@ -127,7 +133,7 @@ class TelegramAPI:
             "setMyShortDescription",
             {
                 "short_description": (
-                    "Понятные отчёты Яндекс Метрики: что изменилось, почему и что проверить."
+                    "Отчёты Яндекс Метрики: что изменилось в трафике и целях, что проверить."
                 )
             },
         )
@@ -135,7 +141,7 @@ class TelegramAPI:
             "setMyDescription",
             {
                 "description": (
-                    "Подключите Яндекс Метрику — бот покажет причины изменений: "
+                    "Подключите Яндекс Метрику — бот покажет изменения: "
                     "источники, посадочные страницы и бизнес-цели. Ежедневные или "
                     "еженедельные отчёты в выбранное время. Доступ только на чтение. "
                     "PrivateSEO: https://private-seo.ru/?utm_source=telegram&utm_medium=bot&utm_campaign=metrika_bot&utm_content=profile "
@@ -196,6 +202,10 @@ class TelegramAPI:
 
     def set_commands(self) -> None:
         commands = [
+            {"command": "connect", "description": "Подключить или обновить доступ к Метрике"},
+            {"command": "disconnect", "description": "Удалить доступ к Метрике"},
+            {"command": "delete_me", "description": "Удалить свои данные"},
+            {"command": "privacy", "description": "Как хранятся данные"},
             {"command": "week", "description": "Отчёт за последние 7 дней"},
             {"command": "counters", "description": "Выбрать счётчик"},
             {"command": "goals", "description": "Выбрать цели и заявки"},

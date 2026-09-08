@@ -12,6 +12,7 @@ EnvironmentFile=/etc/privateseo-metrika-bot.env
 ExecStart=/opt/privateseo-metrika-bot/.venv/bin/python -m metrika_bot
 Restart=always
 RestartSec=5
+TimeoutStopSec=45
 UMask=0077
 NoNewPrivileges=true
 PrivateTmp=true

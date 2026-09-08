@@ -2,10 +2,13 @@ from __future__ import annotations
 
 import html
 import json
-from dataclasses import dataclass
-from datetime import date, timedelta
+from dataclasses import dataclass, field
+from datetime import date, datetime, timedelta
 from typing import Any
 from urllib.parse import urlparse
+from zoneinfo import ZoneInfo
+
+from .formatting import fit_html
 
 from .yandex import YandexClient
 
@@ -70,6 +73,10 @@ class ReportData:
     sources: list[BreakdownChange]
     pages: list[BreakdownChange]
     sampled: bool = False
+    pages_partial: bool = False
+    missing_goals: list[int] = field(default_factory=list)
+    timezone_name: str = "Europe/Moscow"
+    data_delayed: bool = False
 
 
 def completed_weeks(today: date | None = None) -> tuple[Period, Period]:
@@ -105,17 +112,54 @@ def _breakdown(payload: dict[str, Any]) -> dict[str, float]:
 
 
 def compare_breakdowns(
-    current: dict[str, float], previous: dict[str, float]
+    current: dict[str, float],
+    previous: dict[str, float],
+    *,
+    current_complete: bool = True,
+    previous_complete: bool = True,
 ) -> list[BreakdownChange]:
     return [
         BreakdownChange(name, current.get(name, 0), previous.get(name, 0))
-        for name in set(current) | set(previous)
+        for name in sorted(set(current) | set(previous))
+        if (name in current or current_complete) and (name in previous or previous_complete)
     ]
 
 
 class ReportBuilder:
-    def __init__(self, yandex: YandexClient):
+    def __init__(self, yandex: YandexClient, timezone_name: str = "Europe/Moscow"):
         self.yandex = yandex
+        self.timezone_name = timezone_name
+
+    def _pages(self, chat_id: int, counter_id: int, period: Period) -> tuple[dict, bool]:
+        payload = self.yandex.report(
+            chat_id,
+            counter_id,
+            period.api_start,
+            period.api_end,
+            ["ym:s:visits"],
+            ["ym:s:startURL"],
+            limit=500,
+        )
+        rows = list(payload.get("data", []))
+        total = int(payload.get("total_rows", len(rows)))
+        while len(rows) < total and len(rows) < 5000:
+            batch = self.yandex.report(
+                chat_id,
+                counter_id,
+                period.api_start,
+                period.api_end,
+                ["ym:s:visits"],
+                ["ym:s:startURL"],
+                limit=500,
+                offset=len(rows) + 1,
+            )
+            chunk = batch.get("data", [])
+            payload["sampled"] = bool(payload.get("sampled") or batch.get("sampled"))
+            if not chunk:
+                break
+            rows.extend(chunk)
+        payload["data"] = rows
+        return payload, len(rows) >= total
 
     def collect(
         self,
@@ -129,6 +173,7 @@ class ReportBuilder:
         goals = self.yandex.goals(chat_id, counter_id)
         goal_map = {int(goal["id"]): str(goal.get("name") or goal["id"]) for goal in goals}
         selected = [goal_id for goal_id in goal_ids if goal_id in goal_map][:15]
+        today = today or datetime.now(ZoneInfo(self.timezone_name)).date()
         current, previous = completed_periods(days, today)
 
         cur_total = self.yandex.report(
@@ -173,15 +218,13 @@ class ReportBuilder:
             cur_goal_values.extend(_totals(cur_payload))
             prev_goal_values.extend(_totals(prev_payload))
 
-        business_goal_ids = [
-            goal_id for goal_id in selected if goal_relevance(goal_map[goal_id]) > 0
-        ]
+        selected_goal_ids = selected
         goal_visit_payloads: list[dict[str, Any]] = []
         cur_goals: float | None = None
         prev_goals: float | None = None
-        if business_goal_ids:
+        if selected_goal_ids:
             goal_filter = " OR ".join(
-                f"ym:s:goal{goal_id}IsReached=='yes'" for goal_id in business_goal_ids
+                f"ym:s:goal{goal_id}IsReached=='yes'" for goal_id in selected_goal_ids
             )
             cur_goal_visits = self.yandex.report(
                 chat_id,
@@ -209,7 +252,6 @@ class ReportBuilder:
         ]
 
         source_dimension = ["ym:s:trafficSource"]
-        page_dimension = ["ym:s:startURL"]
         cur_sources = self.yandex.report(
             chat_id,
             counter_id,
@@ -226,24 +268,8 @@ class ReportBuilder:
             ["ym:s:visits"],
             source_dimension,
         )
-        cur_pages = self.yandex.report(
-            chat_id,
-            counter_id,
-            current.api_start,
-            current.api_end,
-            ["ym:s:visits"],
-            page_dimension,
-            limit=500,
-        )
-        prev_pages = self.yandex.report(
-            chat_id,
-            counter_id,
-            previous.api_start,
-            previous.api_end,
-            ["ym:s:visits"],
-            page_dimension,
-            limit=500,
-        )
+        cur_pages, cur_complete = self._pages(chat_id, counter_id, current)
+        prev_pages, prev_complete = self._pages(chat_id, counter_id, previous)
         sampled = any(
             payload.get("sampled") is True
             for payload in (
@@ -271,7 +297,16 @@ class ReportBuilder:
             goal_names=[goal_map[goal_id] for goal_id in selected],
             goal_details=goal_details,
             sources=compare_breakdowns(_breakdown(cur_sources), _breakdown(prev_sources)),
-            pages=compare_breakdowns(_breakdown(cur_pages), _breakdown(prev_pages)),
+            pages=compare_breakdowns(
+                _breakdown(cur_pages),
+                _breakdown(prev_pages),
+                current_complete=cur_complete,
+                previous_complete=prev_complete,
+            ),
+            pages_partial=not (cur_complete and prev_complete),
+            missing_goals=[value for value in goal_ids if value not in goal_map],
+            timezone_name=self.timezone_name,
+            data_delayed=any((p.get("data_lag") or 0) > 3600 for p in (cur_total, prev_total)),
             sampled=sampled,
         )
 
@@ -439,6 +474,13 @@ def insights(data: ReportData) -> list[str]:
         notes.append(
             "Срочных действий нет: заметных провалов по источникам и страницам не найдено."
         )
+    if data.pages_partial and len(notes) == 1 and notes[0].startswith("Срочных действий нет"):
+        notes = [
+            "По доступным данным заметных провалов не найдено; часть страниц не удалось сравнить."
+        ]
+    notes.sort(
+        key=lambda note: 0 if note.startswith(("Проверить формы", "Проверить качество")) else 1
+    )
     return notes[:3]
 
 
@@ -562,8 +604,8 @@ def format_compact_rich_report(data: ReportData) -> str:
         ),
     ]
 
-    selected_business = [name for name in data.goal_names if goal_relevance(name) > 0]
-    if data.goals and selected_business:
+    selected_goals = data.goal_names
+    if data.goals and selected_goals:
         blocks[-1] += (
             f"<br><b>Целевые визиты:</b> {_number(data.goals.current)} · "
             f"{html.escape(_compact_change(data.goals))}</p>"
@@ -571,7 +613,7 @@ def format_compact_rich_report(data: ReportData) -> str:
     else:
         blocks[-1] += "</p>"
         warning = (
-            "Выбраны только вспомогательные цели — они не считаются заявками."
+            "Не удалось получить данные выбранных целей. Проверьте /goals."
             if data.goal_names
             else "Бизнес-цели не выбраны."
         )
@@ -596,6 +638,7 @@ def format_compact_rich_report(data: ReportData) -> str:
 
     if data.sampled:
         blocks.append("<footer>Данные семплированы: небольшие изменения приблизительны.</footer>")
+    blocks.extend(f"<footer>{html.escape(note)}</footer>" for note in report_notes(data))
     return "".join(blocks)
 
 
@@ -610,13 +653,13 @@ def format_compact_report(data: ReportData) -> str:
         f"Визиты: {_number(data.visits.current)} · {_compact_change(data.visits)}",
     ]
 
-    selected_business = [name for name in data.goal_names if goal_relevance(name) > 0]
-    if data.goals and selected_business:
+    selected_goals = data.goal_names
+    if data.goals and selected_goals:
         lines.append(
             f"Целевые визиты: {_number(data.goals.current)} · {_compact_change(data.goals)}"
         )
     elif data.goal_names:
-        lines.append("⚠️ Выбраны только вспомогательные цели — они не считаются заявками.")
+        lines.append("⚠️ Не удалось получить данные выбранных целей. Проверьте /goals.")
     else:
         lines.append("⚠️ Бизнес-цели не выбраны.")
 
@@ -638,7 +681,8 @@ def format_compact_report(data: ReportData) -> str:
         lines.extend(f"{index}. {html.escape(note)}" for index, note in enumerate(actions, start=1))
     if data.sampled:
         lines.extend(["", "<i>Данные семплированы: небольшие изменения приблизительны.</i>"])
-    return "\n".join(lines)[:4096]
+    lines.extend(["", *[html.escape(note) for note in report_notes(data)]])
+    return fit_html("\n".join(lines))
 
 
 def format_rich_report(data: ReportData) -> str:
@@ -703,23 +747,22 @@ def format_rich_report(data: ReportData) -> str:
     if page_losses or page_gains:
         blocks.append(
             "<footer>Показано до 3 страниц: ≥3 визитов и ≥20%, либо ≥10 визитов. "
-            "Анализируются до 500 самых посещаемых страниц каждого периода.</footer>"
+            "Анализируются до 5 000 страниц каждого периода; пропуски неполной выгрузки не считаются нулями.</footer>"
         )
 
-    selected_business = [name for name in data.goal_names if goal_relevance(name) > 0]
-    selected_auxiliary = [name for name in data.goal_names if goal_relevance(name) == 0]
-    if data.goals and selected_business:
-        business_details = [item for item in data.goal_details if goal_relevance(item.name) > 0]
+    selected_goals = data.goal_names
+    if data.goals and selected_goals:
+        selected_details = data.goal_details
         goal_rows = [
             (html.escape(item.name), item.previous, item.current, _rich_delta(item))
-            for item in business_details[:8]
+            for item in selected_details[:15]
         ]
         blocks.append(
             _rich_table(
                 "Целевые визиты",
                 [
                     (
-                        "Хотя бы одно бизнес-действие",
+                        "Хотя бы одна выбранная цель",
                         data.goals.previous,
                         data.goals.current,
                         _rich_change(data.goals),
@@ -734,14 +777,9 @@ def format_rich_report(data: ReportData) -> str:
                 "<footer>Один целевой визит может включать несколько достижений; "
                 "в итоговой строке такой визит считается один раз.</footer>"
             )
-        if selected_auxiliary:
-            names = ", ".join(f"«{name}»" for name in selected_auxiliary)
-            blocks.append(f"<footer>Не входят в итог как заявки: {html.escape(names)}.</footer>")
     elif data.goal_names:
-        names = ", ".join(f"«{name}»" for name in data.goal_names)
         blocks.append(
-            f"<blockquote>⚠️ Выбрано только {html.escape(names)} — это не заявка.<br>"
-            "Выберите заявки, телефон, email, мессенджер или чат.</blockquote>"
+            "<blockquote>⚠️ Не удалось получить данные выбранных целей. Проверьте /goals.</blockquote>"
         )
     else:
         blocks.append(
@@ -755,6 +793,7 @@ def format_rich_report(data: ReportData) -> str:
         blocks.append(
             "<footer>Метрика применила семплирование: небольшие изменения могут быть неточными.</footer>"
         )
+    blocks.extend(f"<footer>{html.escape(note)}</footer>" for note in report_notes(data))
     return "".join(blocks)
 
 
@@ -785,29 +824,21 @@ def format_report(data: ReportData, monitor_bot_url: str | None = None) -> str:
         lines.append(
             "<i>До 3 страниц в каждом блоке: изменение от 3 визитов и от 20%, "
             "либо от 10 визитов независимо от процента. "
-            "Сравниваются до 500 самых посещаемых страниц каждого периода.</i>"
+            "Сравниваются до 5 000 страниц каждого периода; пропуски неполной выгрузки не считаются нулями.</i>"
         )
 
-    lines.extend(["", "<b>Бизнес-действия</b>"])
-    selected_business = [name for name in data.goal_names if goal_relevance(name) > 0]
-    selected_auxiliary = [name for name in data.goal_names if goal_relevance(name) == 0]
-    if data.goals and selected_business:
+    lines.extend(["", "<b>Выбранные цели</b>"])
+    selected_goals = data.goal_names
+    if data.goals and selected_goals:
         lines.append(f"Целевые визиты без дублей: {_change(data.goals)}")
-        business_details = [item for item in data.goal_details if goal_relevance(item.name) > 0]
-        for item in business_details[:8]:
+        selected_details = data.goal_details
+        for item in selected_details[:15]:
             lines.append(_mover_line(item, item.name))
         lines.append(
             "<i>Один визит может достичь нескольких целей; в итоговой строке он считается один раз.</i>"
         )
-        if selected_auxiliary:
-            names = ", ".join(f"«{name}»" for name in selected_auxiliary)
-            lines.append(f"ℹ️ Не входят в итог как заявки: {html.escape(names)}.")
     elif data.goal_names:
-        names = ", ".join(f"«{name}»" for name in data.goal_names)
-        lines.append(
-            f"⚠️ Сейчас выбрано только {html.escape(names)} — это не заявка. "
-            "Выберите заявки, телефон, email, мессенджер или чат."
-        )
+        lines.append("⚠️ Не удалось получить данные выбранных целей. Проверьте /goals.")
     else:
         lines.append("⚠️ Цели не выбраны. Настройте заявки, звонки, покупки или чат.")
 
@@ -829,4 +860,19 @@ def format_report(data: ReportData, monitor_bot_url: str | None = None) -> str:
                 f'Работает ли сайт и не появился ли noindex: <a href="{html.escape(monitor_bot_url, quote=True)}">бесплатный мониторинг PrivateSEO</a>',
             ]
         )
-    return "\n".join(lines)[:4096]
+    lines.extend(["", *[html.escape(note) for note in report_notes(data)]])
+    return fit_html("\n".join(lines))
+
+
+def report_notes(data: ReportData) -> list[str]:
+    zone = "МСК" if data.timezone_name == "Europe/Moscow" else data.timezone_name
+    notes = [f"Периоды: {zone}. Распознанные Метрикой роботы исключены из всех показателей."]
+    if data.pages_partial:
+        notes.append(
+            "Выгрузка страниц неполная. Показаны только изменения с известными значениями в обоих периодах; отсутствие строки не означает ноль."
+        )
+    if data.missing_goals:
+        notes.append("Некоторые выбранные цели удалены или недоступны. Проверьте выбор: /goals.")
+    if data.data_delayed:
+        notes.append("Метрика ещё обновляет данные: итог может измениться. Повторите отчёт позже.")
+    return notes
