@@ -211,3 +211,88 @@ def test_optional_chart_failure_does_not_stop_report(monkeypatch):
     service._send_dashboard(123, report(), "snapshot")
     assert "График временно недоступен" in service.telegram.send_message.call_args.args[1]
     assert "Всего визитов" in service.telegram.send_message.call_args.args[1]
+
+
+def test_button_mode_skips_history_and_rendering(monkeypatch):
+    from metrika_bot.dashboard import collect_dashboard
+
+    builder = Mock()
+    builder.collect.return_value = report()
+    history = Mock(side_effect=AssertionError("History must be lazy"))
+    renderer = Mock(side_effect=AssertionError("Rendering must be lazy"))
+    monkeypatch.setattr("metrika_bot.dashboard.collect_history", history)
+    monkeypatch.setattr("metrika_bot.bot.render_chart", renderer)
+    data = collect_dashboard(builder, 123, {"chart_enabled": 0}, date(2026, 9, 23), "month")
+    service = object.__new__(BotService)
+    service.telegram = Mock()
+    service._send_dashboard(123, data, "snapshot", message_id=99)
+    args = service.telegram.edit_message_text.call_args.args
+    assert args[:2] == (123, 99)
+    assert "Форма" in args[2] and "Всего визитов" in args[2]
+    assert any(b["callback_data"] == "chart:snapshot" for row in args[3] for b in row)
+    history.assert_not_called()
+    renderer.assert_not_called()
+    service.telegram.send_chart.assert_not_called()
+
+
+def test_requested_graph_keeps_original_snapshot_and_saved_mode(tmp_path):
+    from types import SimpleNamespace
+
+    db = Database(tmp_path / "bot.sqlite3")
+    db.upsert_user(123, "owner")
+    db.save_tokens(123, "ciphertext", None, None)
+    db.select_counter(123, 1, "first")
+    generation = db.get_connection(123)["generation"]
+    db.set_goals(123, [1])
+    db.set_display(123, generation, sources=["organic"], chart=False, view="month")
+    original = dict(db.get_connection(123))
+    snapshot = db.save_report_context(
+        123,
+        generation,
+        {
+            "connection": {
+                k: original[k]
+                for k in (
+                    "counter_id",
+                    "counter_name",
+                    "goal_ids",
+                    "visible_sources",
+                    "chart_enabled",
+                    "report_view",
+                )
+            },
+            "today": "2026-09-23",
+            "days": 7,
+            "view": "month",
+        },
+    )
+    db.set_goals(123, [2])
+    db.set_display(123, generation, sources=["direct"])
+    service = BotService(SimpleNamespace(report_timezone="Europe/Moscow"), db, Mock(), Mock())
+    service.jobs.submit = lambda _, work: (work(), True)[1]
+    service._run_report = Mock()
+    message = {"message_id": 99, "chat": {"id": 123, "type": "private"}}
+    try:
+        service._handle_callback({"id": "cb", "message": message, "data": f"chart:{snapshot}"})
+        args = service._run_report.call_args.args
+        assert args[1]["goal_ids"] == "[1]"
+        assert source_selection(args[1]) == ["organic"]
+        assert args[1]["chart_enabled"] == 1
+        assert args[2] == date(2026, 9, 23)
+        assert args[7] == "month" and args[8] is None
+        assert db.get_connection(123)["chart_enabled"] == 0
+        service._handle_callback(
+            {"id": "cb", "message": {**message, "photo": [{}]}, "data": f"v:{snapshot}:week"}
+        )
+        args = service._run_report.call_args.args
+        assert args[1]["chart_enabled"] == 1 and args[8:10] == (99, True)
+        assert db.get_connection(123)["chart_enabled"] == 0
+        service._handle_callback({"id": "cb", "message": message, "data": f"v:{snapshot}:day"})
+        assert service._run_report.call_args.args[1]["chart_enabled"] == 0
+        service._run_report.reset_mock()
+        db.select_counter(123, 2, "second")
+        service._handle_callback({"id": "cb", "message": message, "data": f"chart:{snapshot}"})
+        service._run_report.assert_not_called()
+        assert "устарел" in service.telegram.send_message.call_args.args[1]
+    finally:
+        service.stop()

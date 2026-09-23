@@ -464,6 +464,7 @@ class BotService:
         view: str | None = None,
         edit_message_id: int | None = None,
         edit_has_photo: bool = False,
+        force_chart: bool = False,
     ) -> bool:
         with self.locks.for_user(chat_id):
             row = self.db.get_connection(chat_id)
@@ -500,6 +501,8 @@ class BotService:
                 view = requested_view or params.get("view")
                 if requested_view and requested_view != params.get("view"):
                     context_id = None
+            if force_chart:
+                connection["chart_enabled"] = 1
             if requested_view and not scheduled_key:
                 self.db.set_display(chat_id, connection["generation"], view=requested_view)
             if not scheduled_key:
@@ -703,6 +706,13 @@ class BotService:
             ],
         ]
         text = dashboard_text(data)
+        if not data.dashboard.chart_enabled:
+            buttons.insert(1, [{"text": "График", "callback_data": f"chart:{context_id}"}])
+            if message_id and not has_photo:
+                self.telegram.edit_message_text(chat_id, message_id, text, buttons)
+            else:
+                self.telegram.send_message(chat_id, text, buttons)
+            return
         for limit in (3, 2, 1, 0):
             text = dashboard_text(data, goal_limit=limit)
             if len(Visible(text).text.encode("utf-16-le")) // 2 <= 1024:
@@ -748,9 +758,13 @@ class BotService:
             ],
             [
                 {
-                    "text": ("✓ " if connection["chart_enabled"] else "▫️ ") + "Показывать график",
-                    "callback_data": f"src:{gen}:chart",
-                }
+                    "text": ("✓ " if connection["chart_enabled"] else "") + "График сразу",
+                    "callback_data": f"src:{gen}:chart_auto",
+                },
+                {
+                    "text": ("✓ " if not connection["chart_enabled"] else "") + "График по кнопке",
+                    "callback_data": f"src:{gen}:chart_button",
+                },
             ],
             [
                 {"text": "Выбрать цели", "callback_data": "goals"},
@@ -809,7 +823,12 @@ class BotService:
                     view=parts[2],
                     edit_message_id=int(callback["message"]["message_id"]),
                     edit_has_photo=bool(callback["message"].get("photo")),
+                    force_chart=bool(callback["message"].get("photo")),
                 )
+        elif data.startswith("chart:"):
+            parts = data.split(":")
+            if len(parts) == 2:
+                self.send_report(chat_id, context_id=parts[1], force_chart=True)
         elif data.startswith("src:"):
             parts = data.split(":")
             connection = self.db.get_connection(chat_id)
@@ -819,6 +838,8 @@ class BotService:
             key = parts[2]
             if key == "chart":
                 self.db.set_display(chat_id, parts[1], chart=not connection["chart_enabled"])
+            elif key in {"chart_auto", "chart_button"}:
+                self.db.set_display(chat_id, parts[1], chart=key == "chart_auto")
             elif key == "all":
                 self.db.set_display(chat_id, parts[1], all_sources=True)
             elif key == "none":

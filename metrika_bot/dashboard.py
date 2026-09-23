@@ -124,6 +124,7 @@ class Dashboard:
     goal_series: list[float | None] = field(default_factory=list)
     chart_warning: str | None = None
     sampled: bool = False
+    chart_enabled: bool = True
 
 
 def collect_dashboard(builder, chat_id, connection, today, mode, *, chart=True):
@@ -131,7 +132,8 @@ def collect_dashboard(builder, chat_id, connection, today, mode, *, chart=True):
     data = builder.collect(chat_id, connection, today=today, periods=(current, previous))
     dash = Dashboard(mode, title, source_selection(connection), source_ids=data.source_ids)
     data.dashboard = dash
-    if chart and dict(connection).get("chart_enabled", 1):
+    dash.chart_enabled = bool(chart and dict(connection).get("chart_enabled", 1))
+    if dash.chart_enabled:
         try:
             collect_history(builder.yandex, chat_id, int(connection["counter_id"]), data)
         except Exception as exc:
