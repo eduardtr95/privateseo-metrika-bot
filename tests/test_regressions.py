@@ -703,3 +703,46 @@ def test_preparation_never_repopulates_after_disconnect(service):
     assert not service.report_cache.entries
     assert service.reports.collect_compact.call_count == 1
     service.telegram.send_message.assert_called_once()  # Only the requested disconnect confirmation.
+
+
+def test_settings_sections_return_to_overview_and_finish_explicitly(service):
+    gen = service.db.get_connection(123)["generation"]
+    service.db.set_display(123, gen, sources=["organic", "direct"], chart=False)
+    service.send_report = Mock()
+    service.send_sources(123)
+    assert len(service.telegram.send_message.call_args.args[2]) == 4
+    service.handle_update(callback(f"cfg:{gen}:sources"))
+    text = service.telegram.edit_message_text.call_args.args[2]
+    assert "Источники трафика" in text
+    service.handle_update(callback(f"src:{gen}:social"))
+    assert json.loads(service.db.get_connection(123)["visible_sources"]) == [
+        "direct",
+        "organic",
+        "social",
+    ]
+    service.handle_update(callback(f"cfg:{gen}:home"))
+    assert "Соцсети" in service.telegram.edit_message_text.call_args.args[2]
+    service.handle_update(callback(f"cfg:{gen}:chart"))
+    service.handle_update(callback(f"src:{gen}:chart_auto"))
+    assert service.db.get_connection(123)["chart_enabled"] == 1
+    service.handle_update(callback(f"cfg:{gen}:home"))
+    assert "Сразу в отчёте" in service.telegram.edit_message_text.call_args.args[2]
+    service.handle_update(callback(f"cfg:{gen}:goals"))
+    service.handle_update(callback(f"g:{gen}:0:11"))
+    assert json.loads(service.db.get_connection(123)["goal_ids"]) == []
+    service.handle_update(callback(f"cfg:{gen}:home"))
+    text = service.telegram.edit_message_text.call_args.args[2]
+    assert "Не выбраны" in text and "Настройки сохранены" in text
+    service.send_report.assert_not_called()
+    service.handle_update(callback(f"ready:{gen}"))
+    service.send_report.assert_called_once_with(123)
+
+
+@pytest.mark.parametrize("section", ["home", "sources", "goals", "chart"])
+def test_settings_navigation_rejects_old_connection(service, section):
+    old_gen = service.db.get_connection(123)["generation"]
+    service.db.select_counter(123, 2, "second")
+    service.handle_update(callback(f"cfg:{old_gen}:{section}"))
+    assert "устарели" in service.telegram.send_message.call_args.args[1]
+    service.telegram.edit_message_text.assert_not_called()
+    service.yandex.goals.assert_not_called()

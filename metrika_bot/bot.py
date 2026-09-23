@@ -439,19 +439,13 @@ class BotService:
                     {"text": "Снять всё", "callback_data": f"ga:{gen}:{page}:clear"},
                 ]
             )
-        buttons.append(
-            [
-                {
-                    "text": "Готово — показать отчёт" if goals else "Показать трафик без целей",
-                    "callback_data": f"ready:{gen}",
-                }
-            ]
-        )
+        buttons.append([{"text": "Готово · К настройкам", "callback_data": f"cfg:{gen}:home"}])
         text = (
             f"<b>Цели · {html.escape(str(connection['counter_name']))}</b>\n\n"
             f"Выбрано {len(selected)} из 15. Все отмеченные цели входят в итог без дублей. "
             "⭐ — только рекомендация: оставьте действия, важные для вашего сайта.\n"
-            f"Страница {page + 1} из {max(1, (len(goals) - 1) // 20 + 1)}."
+            f"Страница {page + 1} из {max(1, (len(goals) - 1) // 20 + 1)}.\n\n"
+            "✓ Выбор сохраняется сразу"
         )
         if not goals:
             text += "\nВ счётчике пока нет целей; отчёт по трафику доступен."
@@ -756,7 +750,7 @@ class BotService:
             ],
             [
                 {"text": "Подробнее", "callback_data": f"r:{context_id}:full"},
-                {"text": "Что показывать", "callback_data": "sources"},
+                {"text": "Настроить отчёт", "callback_data": "sources"},
             ],
         ]
         text = dashboard_text(data)
@@ -790,7 +784,47 @@ class BotService:
         else:
             self.telegram.send_message(chat_id, dashboard_text(data), buttons)
 
+    @staticmethod
+    def _source_summary(connection):
+        selected = source_selection(connection)
+        if selected is None or set(selected) == set(SOURCE_LABELS):
+            return "Все источники"
+        if not selected:
+            return "Источники скрыты"
+        return ", ".join(label for key, label in SOURCE_LABELS.items() if key in selected)
+
+    def _settings_message(self, chat_id, text, buttons, message_id):
+        if message_id is None:
+            self.telegram.send_message(chat_id, text, buttons)
+        else:
+            self.telegram.edit_message_text(chat_id, message_id, text, buttons)
+
     def send_sources(self, chat_id, message_id=None):
+        """The report settings overview; /sources and older report buttons land here."""
+        connection = self.db.get_connection(chat_id)
+        if not connection or not connection["counter_id"]:
+            self.send_counters(chat_id)
+            return
+        gen = connection["generation"]
+        count = len(json.loads(connection["goal_ids"] or "[]"))
+        goals = f"Выбрано {count}" if count else "Не выбраны"
+        chart = "Сразу в отчёте" if connection["chart_enabled"] else "По кнопке «График»"
+        text = (
+            f"<b>Настройка отчёта</b>\n{html.escape(str(connection['counter_name']))}\n\n"
+            f"<b>Источники:</b> {html.escape(self._source_summary(connection))}\n"
+            f"<b>Цели:</b> {goals}\n"
+            f"<b>График:</b> {chart}\n\n"
+            "✓ Настройки сохранены"
+        )
+        buttons = [
+            [{"text": "Источники трафика →", "callback_data": f"cfg:{gen}:sources"}],
+            [{"text": "Цели →", "callback_data": f"cfg:{gen}:goals"}],
+            [{"text": "График →", "callback_data": f"cfg:{gen}:chart"}],
+            [{"text": "Показать отчёт", "callback_data": f"ready:{gen}"}],
+        ]
+        self._settings_message(chat_id, text, buttons, message_id)
+
+    def send_source_picker(self, chat_id, message_id=None):
         connection = self.db.get_connection(chat_id)
         if not connection or not connection["counter_id"]:
             self.send_counters(chat_id)
@@ -799,7 +833,7 @@ class BotService:
         gen = connection["generation"]
         cells = [
             {
-                "text": ("✓ " if selected is None or key in selected else "▫️ ") + label,
+                "text": ("✅ " if selected is None or key in selected else "☐ ") + label,
                 "callback_data": f"src:{gen}:{key}",
             }
             for key, label in SOURCE_LABELS.items()
@@ -807,37 +841,55 @@ class BotService:
         buttons = [cells[i : i + 2] for i in range(0, len(cells), 2)]
         buttons += [
             [
-                {"text": "Все", "callback_data": f"src:{gen}:all"},
+                {"text": "Выбрать все", "callback_data": f"src:{gen}:all"},
                 {"text": "Снять всё", "callback_data": f"src:{gen}:none"},
             ],
-            [
-                {
-                    "text": ("✓ " if connection["chart_enabled"] else "") + "График сразу",
-                    "callback_data": f"src:{gen}:chart_auto",
-                },
-                {
-                    "text": ("✓ " if not connection["chart_enabled"] else "") + "График по кнопке",
-                    "callback_data": f"src:{gen}:chart_button",
-                },
-            ],
-            [
-                {"text": "Выбрать цели", "callback_data": "goals"},
-                {"text": "Расписание", "callback_data": "schedule"},
-            ],
-            [{"text": "Готово — отчёт", "callback_data": f"ready:{gen}"}],
+            [{"text": "Готово · К настройкам", "callback_data": f"cfg:{gen}:home"}],
         ]
-        text = "<b>Что показывать</b>\nОтметьте источники для списка и графика. Выбор сохраняется.\nИтоги посещаемости и выбранные цели относятся ко всему сайту."
-        if message_id is None:
-            self.telegram.send_message(chat_id, text, buttons)
-        else:
-            self.telegram.edit_message_text(chat_id, message_id, text, buttons)
+        text = (
+            "<b>Источники трафика</b>\nОтметьте источники для списка и графика.\n\n"
+            f"<b>Выбрано:</b> {html.escape(self._source_summary(connection))}\n\n"
+            "✓ Выбор сохраняется сразу\n"
+            "<i>Общие итоги и цели относятся ко всему сайту.</i>"
+        )
+        self._settings_message(chat_id, text, buttons, message_id)
+
+    def send_chart_settings(self, chat_id, message_id=None):
+        connection = self.db.get_connection(chat_id)
+        if not connection or not connection["counter_id"]:
+            self.send_counters(chat_id)
+            return
+        gen = connection["generation"]
+        automatic = bool(connection["chart_enabled"])
+        text = (
+            "<b>График в отчёте</b>\n\n"
+            "<b>Сразу</b> — картинка вместе с цифрами.\n"
+            "<b>По кнопке</b> — сначала цифры; график открывается по нажатию.\n\n"
+            "✓ Выбор сохраняется сразу"
+        )
+        buttons = [
+            [
+                {
+                    "text": ("✅ " if automatic else "☐ ") + "График сразу",
+                    "callback_data": f"src:{gen}:chart_auto",
+                }
+            ],
+            [
+                {
+                    "text": ("✅ " if not automatic else "☐ ") + "График по кнопке",
+                    "callback_data": f"src:{gen}:chart_button",
+                }
+            ],
+            [{"text": "Готово · К настройкам", "callback_data": f"cfg:{gen}:home"}],
+        ]
+        self._settings_message(chat_id, text, buttons, message_id)
 
     def send_settings(self, chat_id: int) -> None:
         self.telegram.send_message(
             chat_id,
             "<b>Настройки отчётов</b>\nВыберите, что изменить:",
             [
-                [{"text": "Что показывать", "callback_data": "sources"}],
+                [{"text": "Настроить отчёт", "callback_data": "sources"}],
                 [
                     {"text": "Цели", "callback_data": "goals"},
                     {"text": "Расписание", "callback_data": "schedule"},
@@ -867,7 +919,7 @@ class BotService:
             "Загружаю график…"
             if data.startswith("chart:")
             else "Загружаю отчёт…"
-            if data.startswith(("v:", "r:")) or data == "week"
+            if data.startswith(("v:", "r:", "ready:")) or data == "week"
             else None
         )
         self.telegram.answer_callback(callback_id, loading)
@@ -890,6 +942,21 @@ class BotService:
             parts = data.split(":")
             if len(parts) == 2:
                 self.send_report(chat_id, context_id=parts[1], force_chart=True)
+        elif data.startswith("cfg:"):
+            parts = data.split(":")
+            connection = self.db.get_connection(chat_id)
+            if len(parts) != 3 or not connection or connection["generation"] != parts[1]:
+                self.telegram.send_message(chat_id, "Эти настройки устарели. Откройте /sources.")
+                return
+            message_id = int(callback["message"]["message_id"])
+            if parts[2] == "home":
+                self.send_sources(chat_id, message_id)
+            elif parts[2] == "sources":
+                self.send_source_picker(chat_id, message_id)
+            elif parts[2] == "chart":
+                self.send_chart_settings(chat_id, message_id)
+            elif parts[2] == "goals":
+                self.send_goals(chat_id, message_id=message_id)
         elif data.startswith("src:"):
             parts = data.split(":")
             connection = self.db.get_connection(chat_id)
@@ -910,7 +977,11 @@ class BotService:
                 selected = set(SOURCE_LABELS if selected is None else selected)
                 selected.symmetric_difference_update({key})
                 self.db.set_display(chat_id, parts[1], sources=list(selected))
-            self.send_sources(chat_id, int(callback["message"]["message_id"]))
+            message_id = int(callback["message"]["message_id"])
+            if key in {"chart", "chart_auto", "chart_button"}:
+                self.send_chart_settings(chat_id, message_id)
+            else:
+                self.send_source_picker(chat_id, message_id)
         elif data.startswith("r:"):
             parts = data.split(":")
             if len(parts) == 3 and parts[2] in {"short", "full"}:
@@ -951,6 +1022,7 @@ class BotService:
                 return
             action = parts[0]
             if action == "ready":
+                self.send_sources(chat_id, int(callback["message"]["message_id"]))
                 self.send_report(chat_id)
             elif action == "cp":
                 self.send_counters(chat_id, int(parts[2]))
