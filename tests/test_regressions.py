@@ -520,3 +520,53 @@ def test_source_toggle_and_goal_selection_preserve_each_other(service):
     assert service.db.get_connection(123)["visible_sources"] == "[]"
     service.handle_update(callback(f"src:{generation}:all"))
     assert service.db.get_connection(123)["visible_sources"] is None
+
+
+def test_chart_reuses_summary_and_details_fetch_only_pages(service):
+    from metrika_bot.dashboard import collect_dashboard
+    from unittest.mock import patch
+
+    calls = []
+
+    def response(chat_id, counter_id, start, end, metrics, dimensions=None, **kwargs):
+        calls.append((tuple(metrics), tuple(dimensions or [])))
+        if dimensions == ["ym:s:date", "ym:s:trafficSource"]:
+            return {"data": [{"dimensions": [{"id": end}, {"id": "organic"}], "metrics": [10]}]}
+        if dimensions == ["ym:s:date"]:
+            return {"data": [{"dimensions": [{"id": end}], "metrics": [2]}]}
+        if dimensions:
+            return {"data": [{"dimensions": [{"id": "organic", "name": "Поиск"}], "metrics": [10]}]}
+        return {"totals": [10] * len(metrics)}
+
+    service.yandex.report = Mock(side_effect=response)
+    service.yandex.goals = Mock(return_value=[{"id": 11, "name": "Форма"}])
+    row = dict(service.db.get_connection(123))
+    row["chart_enabled"] = 0
+    today = date(2026, 9, 23)
+    sent = []
+    service._send_formatted_report = lambda chat, data, **kw: sent.append(data)
+    service._run_report(123, row, today, 7, False, None, None, view="month")
+    assert not any("ym:s:startURL" in dims for _, dims in calls)
+    assert len(calls) == 8
+    row["chart_enabled"] = 1
+    service._run_report(123, row, today, 7, False, None, None, view="month")
+    assert len(calls) == 10  # Only the two history queries were added.
+    service._run_report(123, row, today, 7, False, None, None, view="month")
+    assert len(calls) == 10
+    assert sent[-1].dashboard.dates and sent[-1].visits.current == 10
+    service._run_report(123, row, today, 7, True, None, None, view="month")
+    assert len(calls) == 12 and sent[-1].pages_loaded
+    assert all(dims == ("ym:s:startURL",) for _, dims in calls[-2:])
+    assert service.yandex.goals.call_count == 1
+    # Connection removal during an in-flight fetch must not repopulate the cache.
+    service.report_cache.drop(123)
+
+    def disconnect(*args, **kwargs):
+        result = collect_dashboard(*args, **kwargs)
+        service.handle_update(command("/disconnect"))
+        return result
+
+    with patch("metrika_bot.bot.collect_dashboard", side_effect=disconnect):
+        service._run_report(123, row, today, 7, False, None, None, view="month")
+    assert not service.report_cache.entries
+    assert len(sent) == 4

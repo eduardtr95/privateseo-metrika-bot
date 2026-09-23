@@ -18,7 +18,8 @@ from .analysis import (
     goal_relevance,
 )
 from .dashboard import MODES, SOURCE_LABELS, collect_dashboard, dashboard_text, source_selection
-from .dashboard import dashboard_details
+from .dashboard import dashboard_details, ensure_history
+from .report_cache import ReportCache
 from .charts import render_chart
 from .config import Config
 from .runtime import KeyedQueue, UserLocks
@@ -72,6 +73,7 @@ class BotService:
         self._setup_runtime()
 
     def _setup_runtime(self):
+        self.report_cache = ReportCache()
         self.stop_event = threading.Event()
         self.locks = UserLocks()
         self.updates = KeyedQueue(4, 64, "bot-control")
@@ -194,6 +196,8 @@ class BotService:
         status = membership.get("new_chat_member", {}).get("status")
         if status in {"left", "kicked"}:
             self.db.delete_user(int(chat["id"]))
+            if hasattr(self, "report_cache"):
+                self.report_cache.drop(int(chat["id"]))
 
     def _handle_message(self, message: dict) -> None:
         chat_id = int(message["chat"]["id"])
@@ -238,6 +242,7 @@ class BotService:
         elif command == "/disconnect":
             self.epochs[chat_id] = self.epochs.get(chat_id, 0) + 1
             self.db.disconnect(chat_id)
+            self.report_cache.drop(chat_id)
             self.telegram.send_message(
                 chat_id,
                 "Доступ к Метрике удалён из бота. В Яндекс ID его также можно отозвать в разделе доступов.",
@@ -245,6 +250,7 @@ class BotService:
         elif command == "/delete_me":
             self.epochs[chat_id] = self.epochs.get(chat_id, 0) + 1
             self.db.delete_user(chat_id)
+            self.report_cache.drop(chat_id)
             self.telegram.send_message(
                 chat_id,
                 "Данные удалены из рабочей базы, новые отчёты остановлены. Резервные копии удаляются в течение 14 дней. Старые сообщения Telegram можно удалить в чате.",
@@ -252,7 +258,7 @@ class BotService:
         elif command == "/privacy":
             self.telegram.send_message(
                 chat_id,
-                "<b>Приватность</b>\n\nБот хранит Telegram ID и username, источник первого запуска, выбранный счётчик, цели, источники и вид отчёта, расписание, зашифрованные токены и технические события. Параметры кнопок отчётов хранятся до 30 дней, события — до 90 дней. Сырые выгрузки и тексты отчётов не сохраняются. /disconnect удаляет доступ и ожидающие подключения, /delete_me — данные из рабочей базы. Резервные копии удаляются в течение 14 дней.",
+                "<b>Приватность</b>\n\nБот хранит Telegram ID и username, источник первого запуска, выбранный счётчик, цели, источники и вид отчёта, расписание, зашифрованные токены и технические события. Параметры кнопок отчётов хранятся до 30 дней, события — до 90 дней. Сырые выгрузки и тексты отчётов не сохраняются на диск. Агрегаты временно переиспользуются в памяти до 5 минут. /disconnect удаляет доступ и ожидающие подключения, /delete_me — данные из рабочей базы. Резервные копии удаляются в течение 14 дней.",
             )
         elif command == "/feedback":
             self._feedback(chat_id)
@@ -555,16 +561,34 @@ class BotService:
                 return
         try:
             with self.yandex.report_scope(chat_id, generation):
-                data = (
-                    collect_dashboard(
-                        self.reports, chat_id, connection, today, view, chart=not detailed
+                cache_key = None
+                if view:
+                    cache_key = self.report_cache.key(chat_id, connection, today, view)
+                    data = self.report_cache.get(cache_key)
+                    if data is None:
+                        data = collect_dashboard(
+                            self.reports,
+                            chat_id,
+                            connection,
+                            today,
+                            view,
+                            chart=False,
+                            include_pages=False,
+                        )
+                    if detailed and not data.pages_loaded:
+                        self.reports.add_pages(chat_id, int(connection["counter_id"]), data)
+                    data.dashboard.chart_enabled = bool(
+                        not detailed and connection.get("chart_enabled", 1)
                     )
-                    if view
-                    else self.reports.collect(chat_id, connection, today=today, days=days)
-                )
+                    if data.dashboard.chart_enabled:
+                        ensure_history(self.reports, chat_id, connection, data)
+                else:
+                    data = self.reports.collect(chat_id, connection, today=today, days=days)
             with self.locks.for_user(chat_id):
                 if self.stop_event.is_set() or not self.current_connection(chat_id, generation):
                     return
+                if cache_key:
+                    self.report_cache.put(cache_key, data)
                 if scheduled_key:
                     user = self.db.get_user(chat_id)
                     if (
@@ -809,7 +833,14 @@ class BotService:
                 "Это кнопки прежней версии. Откройте /goals, /counters или новый отчёт /week.",
             )
             return
-        self.telegram.answer_callback(callback_id)
+        loading = (
+            "Загружаю график…"
+            if data.startswith("chart:")
+            else "Загружаю отчёт…"
+            if data.startswith(("v:", "r:")) or data == "week"
+            else None
+        )
+        self.telegram.answer_callback(callback_id, loading)
         if data == "week":
             self.send_report(chat_id)
         elif data == "sources":
@@ -958,6 +989,7 @@ class BotService:
     def scheduler_tick(self):
         now = datetime.now(ZoneInfo(self.config.report_timezone))
         self.db.cleanup()
+        self.report_cache.prune()
         for row in self.db.scheduled_users():
             if self.stop_event.is_set():
                 break
@@ -983,6 +1015,7 @@ class BotService:
             user = self.db.get_user(chat_id)
             if not user or user["epoch"] != stored["user_epoch"]:
                 return False
+            self.report_cache.drop(chat_id)
             self.yandex.save_tokens(chat_id, tokens)
             self.db.clear_report_failure(chat_id)
             self.db.event(chat_id, "oauth_connected")

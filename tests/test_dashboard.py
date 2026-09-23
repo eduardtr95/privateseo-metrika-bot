@@ -296,3 +296,59 @@ def test_requested_graph_keeps_original_snapshot_and_saved_mode(tmp_path):
         assert "устарел" in service.telegram.send_message.call_args.args[1]
     finally:
         service.stop()
+
+
+def test_report_cache_isolated_expires_and_copies():
+    from metrika_bot.report_cache import ReportCache
+
+    clock = [0]
+    cache = ReportCache(ttl=10, capacity=2, clock=lambda: clock[0])
+    connection = {"generation": "a", "counter_id": 1, "counter_name": "x", "goal_ids": "[1]"}
+    key = cache.key(1, connection, date(2026, 9, 23), "month")
+    cache.put(key, report())
+    changed = cache.get(key)
+    changed.visits = Change(999, 1)
+    assert cache.get(key).visits.current == 120
+    for field, value in [
+        ("generation", "b"),
+        ("counter_id", 2),
+        ("goal_ids", "[2]"),
+        ("visible_sources", '["direct"]'),
+    ]:
+        assert (
+            cache.get(cache.key(1, {**connection, field: value}, date(2026, 9, 23), "month"))
+            is None
+        )
+    assert cache.get(cache.key(2, connection, date(2026, 9, 23), "month")) is None
+    clock[0] = 9
+    cache.put(key, report())
+    clock[0] = 10
+    assert cache.get(key) is None  # Cache hits do not extend freshness indefinitely.
+    cache.put(key, report())
+    cache.put((2,), report())
+    cache.put((3,), report())
+    assert cache.get(key) is None
+    cache.drop(2)
+    assert cache.get((2,)) is None
+
+
+def test_partial_history_is_retried_and_not_drawn(monkeypatch):
+    from metrika_bot.dashboard import ensure_history
+
+    data = report()
+
+    def incomplete(*args):
+        data.dashboard.dates = [date(2026, 9, 22)]
+        data.dashboard.series = {"organic": [0]}
+        raise ValueError("Incomplete")
+
+    fetch = Mock(side_effect=incomplete)
+    monkeypatch.setattr("metrika_bot.dashboard.collect_history", fetch)
+    ensure_history(Mock(), 123, {"counter_id": 1}, data)
+    assert render_chart(data) is None
+    data.dashboard.chart_enabled = False
+    assert "График временно" not in dashboard_text(data)
+    data.dashboard.chart_enabled = True
+    ensure_history(Mock(), 123, {"counter_id": 1}, data)
+    assert fetch.call_count == 2
+    assert render_chart(data) is None

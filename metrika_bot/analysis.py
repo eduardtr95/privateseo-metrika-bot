@@ -80,6 +80,7 @@ class ReportData:
     source_ids: dict[str, str] = field(default_factory=dict)
     valid_goal_ids: list[int] = field(default_factory=list)
     dashboard: Any = None
+    pages_loaded: bool = True
 
 
 def completed_weeks(today: date | None = None) -> tuple[Period, Period]:
@@ -171,6 +172,7 @@ class ReportBuilder:
         today: date | None = None,
         days: int = 7,
         periods: tuple[Period, Period] | None = None,
+        include_pages: bool = True,
     ) -> ReportData:
         counter_id = int(connection["counter_id"])
         goal_ids = [int(value) for value in json.loads(connection["goal_ids"] or "[]")]
@@ -272,8 +274,12 @@ class ReportBuilder:
             ["ym:s:visits"],
             source_dimension,
         )
-        cur_pages, cur_complete = self._pages(chat_id, counter_id, current)
-        prev_pages, prev_complete = self._pages(chat_id, counter_id, previous)
+        cur_pages, cur_complete = (
+            self._pages(chat_id, counter_id, current) if include_pages else ({}, True)
+        )
+        prev_pages, prev_complete = (
+            self._pages(chat_id, counter_id, previous) if include_pages else ({}, True)
+        )
         sampled = any(
             payload.get("sampled") is True
             for payload in (
@@ -321,7 +327,21 @@ class ReportBuilder:
                 if row.get("dimensions")
             },
             valid_goal_ids=selected,
+            pages_loaded=include_pages,
         )
+
+    def add_pages(self, chat_id, counter_id, data):
+        current, cur_complete = self._pages(chat_id, counter_id, data.current_period)
+        previous, prev_complete = self._pages(chat_id, counter_id, data.previous_period)
+        data.pages = compare_breakdowns(
+            _breakdown(current),
+            _breakdown(previous),
+            current_complete=cur_complete,
+            previous_complete=prev_complete,
+        )
+        data.pages_partial = not (cur_complete and prev_complete)
+        data.sampled = data.sampled or bool(current.get("sampled") or previous.get("sampled"))
+        data.pages_loaded = True
 
 
 def _number(value: float) -> str:

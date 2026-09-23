@@ -127,22 +127,33 @@ class Dashboard:
     chart_enabled: bool = True
 
 
-def collect_dashboard(builder, chat_id, connection, today, mode, *, chart=True):
+def collect_dashboard(builder, chat_id, connection, today, mode, *, chart=True, include_pages=True):
     current, previous, title = calendar_periods(mode, today)
-    data = builder.collect(chat_id, connection, today=today, periods=(current, previous))
+    data = builder.collect(
+        chat_id, connection, today=today, periods=(current, previous), include_pages=include_pages
+    )
     dash = Dashboard(mode, title, source_selection(connection), source_ids=data.source_ids)
     data.dashboard = dash
     dash.chart_enabled = bool(chart and dict(connection).get("chart_enabled", 1))
     if dash.chart_enabled:
-        try:
-            collect_history(builder.yandex, chat_id, int(connection["counter_id"]), data)
-        except Exception as exc:
-            from .yandex import YandexAPIError
-
-            if isinstance(exc, YandexAPIError) and exc.reconnect:
-                raise
-            dash.chart_warning = "График временно недоступен; цифры отчёта получены."
+        ensure_history(builder, chat_id, connection, data)
     return data
+
+
+def ensure_history(builder, chat_id, connection, data):
+    dash = data.dashboard
+    if dash.dates and not dash.chart_warning:
+        return
+    dash.dates, dash.series, dash.goal_series = [], {}, []
+    dash.chart_warning, dash.sampled = None, False
+    try:
+        collect_history(builder.yandex, chat_id, int(connection["counter_id"]), data)
+    except Exception as exc:
+        from .yandex import YandexAPIError
+
+        if isinstance(exc, YandexAPIError) and exc.reconnect:
+            raise
+        dash.chart_warning = "График временно недоступен; цифры отчёта получены."
 
 
 def collect_history(yandex, chat_id, counter_id, data):
@@ -284,7 +295,7 @@ def dashboard_text(data: ReportData, goal_limit: int = 3) -> str:
         lines.append("⚠️ Выборочные данные: изменения приблизительны.")
     if data.data_delayed:
         lines.append("⚠️ Метрика ещё обновляет данные.")
-    if dash.chart_warning:
+    if dash.chart_enabled and dash.chart_warning:
         lines.append(dash.chart_warning)
     lines.extend(["", "<i>МСК · без роботов. Итоги и цели — весь сайт.</i>"])
     return "\n".join(lines)
