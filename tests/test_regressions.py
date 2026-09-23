@@ -43,6 +43,7 @@ def service(tmp_path):
     db = Database(cfg.database_path)
     yandex = YandexClient(cfg, db, TokenCipher(cfg.token_encryption_key))
     bot = BotService(cfg, db, Mock(), yandex)
+    bot.prefetch.submit = Mock(return_value=False)
     db.upsert_user(123, "owner")
     yandex.save_tokens(123, OAuthTokens("access", "refresh", None))
     db.select_counter(123, 1, "example.test")
@@ -245,7 +246,7 @@ def test_inflight_report_cannot_send_or_recreate_events_after_removal(service, d
         assert release.wait(5)
         return sample()
 
-    service.reports.collect = collect
+    service.reports.collect_compact = collect
     try:
         assert service.send_report(123)
         assert started.wait(3)
@@ -283,7 +284,7 @@ def test_repeated_report_requests_are_coalesced_and_other_user_progresses(servic
             second.set()
         return sample()
 
-    service.reports.collect = collect
+    service.reports.collect_compact = collect
     try:
         assert service.send_report(123)
         assert started.wait(2)
@@ -492,10 +493,10 @@ def test_calendar_snapshot_preserves_sources_goals_and_anchor_on_period_switch(s
     )
     service.db.set_display(123, row["generation"], sources=["social"])
     service.db.set_goals(123, [22])
-    service.reports.collect = Mock(return_value=sample(source_ids={}))
+    service.reports.collect_compact = Mock(return_value=sample(source_ids={}))
     assert service.send_report(123, context_id=ctx, view="month", edit_message_id=77)
     service.jobs.executor.shutdown(wait=True)
-    call = service.reports.collect.call_args
+    call = service.reports.collect_compact.call_args
     assert call.args[1]["goal_ids"] == "[11]"
     assert json.loads(call.args[1]["visible_sources"]) == ["organic"]
     assert call.kwargs["today"] == date(2026, 9, 23)
@@ -506,6 +507,7 @@ def test_calendar_snapshot_preserves_sources_goals_and_anchor_on_period_switch(s
     assert service.db.get_connection(123)["report_view"] == "month"
     assert service.db.get_connection(123)["visible_sources"] == '["social"]'
     assert service.telegram.edit_message_text.call_args.args[1] == 77
+    service.telegram.send_chat_action.assert_not_called()
     service.telegram.send_message.assert_not_called()
 
 
@@ -538,6 +540,11 @@ def test_chart_reuses_summary_and_details_fetch_only_pages(service):
             return {"data": [{"dimensions": [{"id": "organic", "name": "Поиск"}], "metrics": [10]}]}
         return {"totals": [10] * len(metrics)}
 
+    def compare(chat_id, counter_id, current, previous, metrics, dimensions=None, **kwargs):
+        calls.append((tuple(metrics), tuple(dimensions or [])))
+        return {"totals": {"a": [10] * len(metrics), "b": [10] * len(metrics)}, "data": []}
+
+    service.yandex.comparison = Mock(side_effect=compare)
     service.yandex.report = Mock(side_effect=response)
     service.yandex.goals = Mock(return_value=[{"id": 11, "name": "Форма"}])
     row = dict(service.db.get_connection(123))
@@ -547,15 +554,15 @@ def test_chart_reuses_summary_and_details_fetch_only_pages(service):
     service._send_formatted_report = lambda chat, data, **kw: sent.append(data)
     service._run_report(123, row, today, 7, False, None, None, view="month")
     assert not any("ym:s:startURL" in dims for _, dims in calls)
-    assert len(calls) == 8
+    assert len(calls) == 2
     row["chart_enabled"] = 1
     service._run_report(123, row, today, 7, False, None, None, view="month")
-    assert len(calls) == 10  # Only the two history queries were added.
+    assert len(calls) == 4  # Only the two history queries were added.
     service._run_report(123, row, today, 7, False, None, None, view="month")
-    assert len(calls) == 10
+    assert len(calls) == 4
     assert sent[-1].dashboard.dates and sent[-1].visits.current == 10
     service._run_report(123, row, today, 7, True, None, None, view="month")
-    assert len(calls) == 12 and sent[-1].pages_loaded
+    assert len(calls) == 6 and sent[-1].pages_loaded
     assert all(dims == ("ym:s:startURL",) for _, dims in calls[-2:])
     assert service.yandex.goals.call_count == 1
     # Connection removal during an in-flight fetch must not repopulate the cache.
@@ -570,3 +577,129 @@ def test_chart_reuses_summary_and_details_fetch_only_pages(service):
         service._run_report(123, row, today, 7, False, None, None, view="month")
     assert not service.report_cache.entries
     assert len(sent) == 4
+
+
+def test_comparison_batches_all_goals_and_keeps_exact_unique_totals(service):
+    client = service.yandex
+    client.goals = Mock(return_value=[{"id": i, "name": f"Goal {i}"} for i in range(1, 16)])
+    service.db.set_goals(123, list(range(1, 16)))
+
+    def response(chat, counter, current, previous, metrics, dimensions=None, filters=None):
+        assert len(metrics) <= 10
+        if filters:
+            assert all(f"goal{i}IsReached" in filters for i in range(1, 16))
+            return {"totals": {"a": [7], "b": [5]}}
+        totals = {
+            "a": [100 if m == "ym:s:visits" else 40 if m == "ym:s:users" else 2 for m in metrics],
+            "b": [90 if m == "ym:s:visits" else 35 if m == "ym:s:users" else 1 for m in metrics],
+        }
+        return {
+            "totals": totals,
+            "data": [
+                {
+                    "dimensions": [{"id": "organic", "name": "Поиск"}],
+                    "metrics": {"a": [60], "b": [90]},
+                },
+                {
+                    "dimensions": [{"id": None, "name": "Не определено"}],
+                    "metrics": {"a": [40], "b": [0]},
+                },
+            ]
+            if dimensions
+            else [],
+            "sampled": False,
+        }
+
+    client.comparison = Mock(side_effect=response)
+    from metrika_bot.dashboard import collect_dashboard
+
+    data = collect_dashboard(
+        service.reports,
+        123,
+        dict(service.db.get_connection(123)),
+        date(2026, 9, 23),
+        "month",
+        chart=False,
+        fast=True,
+    )
+    assert data.visits == Change(100, 90) and data.users == Change(40, 35)
+    assert data.goals == Change(7, 5) and len(data.goal_details) == 15
+    assert (
+        sum(g.current for g in data.goal_details) == 30
+    )  # Separate reaches never replace unique visits.
+    assert data.source_ids["Не определено"] == "undefined"
+    assert client.comparison.call_count == 3
+
+
+def test_comparison_rejects_incomplete_sources_and_totals(service):
+    row = dict(service.db.get_connection(123))
+    from metrika_bot.dashboard import calendar_periods
+
+    cur, prev, _ = calendar_periods("week", date(2026, 9, 23))
+    for payload in (
+        {"totals": {"a": [None, 1, 1], "b": [1, 1, 1]}, "data": []},
+        {"totals": {"a": [1, 1, 1], "b": [1, 1, 1]}, "data": [], "total_rows": 2},
+    ):
+        service.yandex.comparison = Mock(return_value=payload)
+        with pytest.raises(YandexAPIError, match="неполн"):
+            service.reports.collect_compact(123, row, date(2026, 9, 23), (cur, prev))
+
+
+def test_preparation_populates_other_views_without_messages(service):
+    row = dict(service.db.get_connection(123))
+    row["chart_enabled"] = 0
+    today = date(2026, 9, 23)
+
+    def collect(*args, periods, **kwargs):
+        return sample(current_period=periods[0], previous_period=periods[1], pages_loaded=False)
+
+    service.reports.collect_compact = Mock(side_effect=collect)
+    service._calendar_data(123, row, today, "day")
+    service._prepare_views(123, row, today, "day")
+    assert service.reports.collect_compact.call_count == 3
+    for mode in ("week", "month", "day"):
+        assert service._calendar_data(123, row, today, mode).dashboard.mode == mode
+    assert service.reports.collect_compact.call_count == 3
+    service.telegram.send_message.assert_not_called()
+    service.telegram.send_chart.assert_not_called()
+
+
+def test_preparation_and_foreground_share_inflight_period(service):
+    row = dict(service.db.get_connection(123))
+    row["chart_enabled"] = 0
+    today = date(2026, 9, 23)
+    started, release = threading.Event(), threading.Event()
+
+    def collect(*args, periods, **kwargs):
+        if periods[0].start == date(2026, 9, 21):
+            started.set()
+            assert release.wait(3)
+        return sample(current_period=periods[0], previous_period=periods[1])
+
+    service.reports.collect_compact = Mock(side_effect=collect)
+    with ThreadPoolExecutor(max_workers=3) as pool:
+        prep = pool.submit(service._prepare_views, 123, row, today, "day")
+        assert started.wait(2)
+        click = pool.submit(service._calendar_data, 123, row, today, "week")
+        # Another period need not wait for the preparation queue or the week fetch.
+        other = pool.submit(service._calendar_data, 123, row, today, "day")
+        assert other.result(2).dashboard.mode == "day"
+        release.set()
+        assert click.result(2).dashboard.mode == "week"
+        prep.result(2)
+    assert service.reports.collect_compact.call_count == 3
+
+
+def test_preparation_never_repopulates_after_disconnect(service):
+    row = dict(service.db.get_connection(123))
+    row["chart_enabled"] = 0
+
+    def collect(*args, **kwargs):
+        service.handle_update(command("/disconnect"))
+        return sample()
+
+    service.reports.collect_compact = Mock(side_effect=collect)
+    service._prepare_views(123, row, date(2026, 9, 23), "day")
+    assert not service.report_cache.entries
+    assert service.reports.collect_compact.call_count == 1
+    service.telegram.send_message.assert_called_once()  # Only the requested disconnect confirmation.

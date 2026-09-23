@@ -46,3 +46,32 @@ def test_stored_access_token_is_encrypted(tmp_path: Path):
     row = db.get_connection(123)
     assert "plain-access" not in row["access_token"]
     assert cipher.decrypt(row["access_token"]) == "plain-access"
+
+
+def test_comparison_preserves_dates_robot_filters_and_undefined(tmp_path):
+    from datetime import date
+    from unittest.mock import Mock
+    from metrika_bot.analysis import Period
+
+    cfg = config(tmp_path)
+    client = YandexClient(cfg, Database(cfg.database_path), TokenCipher(cfg.token_encryption_key))
+    client._api = Mock(return_value={})
+    client.comparison(
+        123,
+        1,
+        Period(date(2026, 9, 1), date(2026, 9, 22)),
+        Period(date(2026, 8, 1), date(2026, 8, 22)),
+        ["ym:s:visits"],
+        dimensions=["ym:s:trafficSource"],
+        filters="ym:s:goal1IsReached=='yes'",
+    )
+    chat, path, params = client._api.call_args.args
+    assert chat == 123 and path == "/stat/v1/data/comparison"
+    assert params["date1_a"] == "2026-09-01" and params["date2_b"] == "2026-08-22"
+    assert (
+        params["filters_a"]
+        == params["filters_b"]
+        == "(ym:s:goal1IsReached=='yes') AND ym:s:isRobot=='No'"
+    )
+    assert params["timezone"] == "+03:00" and params["accuracy"] == "full"
+    assert params["include_undefined"] == "true"

@@ -224,9 +224,35 @@ class YandexClient:
         }
         if dimensions:
             params["dimensions"] = ",".join(dimensions)
+            if "ym:s:trafficSource" in dimensions:
+                params["include_undefined"] = "true"
         if filters:
             params["filters"] = f"({filters}) AND ym:s:isRobot=='No'"
         return self._api(chat_id, "/stat/v1/data", params)
+
+    def comparison(
+        self, chat_id, counter_id, current, previous, metrics, *, dimensions=None, filters=None
+    ):
+        params = {
+            "ids": counter_id,
+            "metrics": ",".join(metrics),
+            "date1_a": current.api_start,
+            "date2_a": current.api_end,
+            "date1_b": previous.api_start,
+            "date2_b": previous.api_end,
+            "accuracy": "full",
+            "lang": "ru",
+            "limit": 1000,
+            "timezone": self.report_timezone(current.api_end),
+            "filters_a": "ym:s:isRobot=='No'",
+            "filters_b": "ym:s:isRobot=='No'",
+            "include_undefined": "true",
+        }
+        if dimensions:
+            params["dimensions"] = ",".join(dimensions)
+        if filters:
+            params["filters_a"] = params["filters_b"] = f"({filters}) AND ym:s:isRobot=='No'"
+        return self._api(chat_id, "/stat/v1/data/comparison", params)
 
     def report_timezone(self, day: str) -> str:
         zone = ZoneInfo(self.config.report_timezone)

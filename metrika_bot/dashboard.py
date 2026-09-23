@@ -127,10 +127,20 @@ class Dashboard:
     chart_enabled: bool = True
 
 
-def collect_dashboard(builder, chat_id, connection, today, mode, *, chart=True, include_pages=True):
+def collect_dashboard(
+    builder, chat_id, connection, today, mode, *, chart=True, include_pages=True, fast=False
+):
     current, previous, title = calendar_periods(mode, today)
-    data = builder.collect(
-        chat_id, connection, today=today, periods=(current, previous), include_pages=include_pages
+    data = (
+        builder.collect_compact(chat_id, connection, today=today, periods=(current, previous))
+        if fast
+        else builder.collect(
+            chat_id,
+            connection,
+            today=today,
+            periods=(current, previous),
+            include_pages=include_pages,
+        )
     )
     dash = Dashboard(mode, title, source_selection(connection), source_ids=data.source_ids)
     data.dashboard = dash
@@ -199,7 +209,9 @@ def collect_history(yandex, chat_id, counter_id, data):
         selected = (
             dash.selected_sources
             if dash.selected_sources is not None
-            else list(dict.fromkeys(str(row["dimensions"][1]["id"]) for row in traffic))
+            else list(
+                dict.fromkeys(str(row["dimensions"][1].get("id") or "undefined") for row in traffic)
+            )
         )
         for key in selected:
             dash.series[key] = [0.0] * len(dash.dates)
@@ -207,7 +219,7 @@ def collect_history(yandex, chat_id, counter_id, data):
             dimensions = row["dimensions"]
             day, key = (
                 str(dimensions[0].get("id") or dimensions[0]["name"]),
-                str(dimensions[1]["id"]),
+                str(dimensions[1].get("id") or "undefined"),
             )
             if day not in date_index:
                 raise ValueError("Unexpected history date")

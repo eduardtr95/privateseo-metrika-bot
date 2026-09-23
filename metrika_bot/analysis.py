@@ -330,6 +330,93 @@ class ReportBuilder:
             pages_loaded=include_pages,
         )
 
+    def collect_compact(self, chat_id, connection, today, periods):
+        """Fetch both periods together; totals stay exact, never sum unique users."""
+        from .yandex import YandexAPIError
+
+        counter_id = int(connection["counter_id"])
+        goal_ids = [int(v) for v in json.loads(connection["goal_ids"] or "[]")]
+        goal_map = {
+            int(g["id"]): str(g.get("name") or g["id"])
+            for g in self.yandex.goals(chat_id, counter_id)
+        }
+        selected = [g for g in goal_ids if g in goal_map][:15]
+        current, previous = periods
+        metrics = ["ym:s:visits", "ym:s:users"] + [f"ym:s:goal{g}reaches" for g in selected]
+        payloads, values = [], {"a": [], "b": []}
+        sources, source_ids = [], {}
+        for offset in range(0, len(metrics), 10):
+            batch = metrics[offset : offset + 10]
+            payload = self.yandex.comparison(
+                chat_id,
+                counter_id,
+                current,
+                previous,
+                batch,
+                dimensions=["ym:s:trafficSource"] if offset == 0 else None,
+            )
+            payloads.append(payload)
+            for segment in ("a", "b"):
+                raw = (payload.get("totals") or {}).get(segment)
+                if raw is None or len(raw) != len(batch) or any(v is None for v in raw):
+                    raise YandexAPIError("Метрика вернула неполные итоги. Повторите отчёт позже.")
+                values[segment].extend(float(v or 0) for v in raw)
+            if offset == 0:
+                rows = payload.get("data", [])
+                if payload.get("total_rows_rounded") or len(rows) < int(
+                    payload.get("total_rows", len(rows))
+                ):
+                    raise YandexAPIError(
+                        "Метрика вернула неполный список источников. Повторите отчёт позже."
+                    )
+                for row in rows:
+                    dim = row["dimensions"][0]
+                    name = str(dim.get("name") or dim.get("id") or "Не определено")
+                    sides = row["metrics"]
+                    if any(not sides.get(side) or sides[side][0] is None for side in ("a", "b")):
+                        raise YandexAPIError("Метрика вернула неполные данные источников.")
+                    sources.append(
+                        BreakdownChange(name, float(sides["a"][0]), float(sides["b"][0]))
+                    )
+                    source_ids[name] = str(dim.get("id") or "undefined")
+        goals = None
+        if selected:
+            payload = self.yandex.comparison(
+                chat_id,
+                counter_id,
+                current,
+                previous,
+                ["ym:s:visits"],
+                filters=" OR ".join(f"ym:s:goal{g}IsReached=='yes'" for g in selected),
+            )
+            payloads.append(payload)
+            totals = payload.get("totals") or {}
+            if any(len(totals.get(side, [])) != 1 for side in ("a", "b")):
+                raise YandexAPIError("Метрика вернула неполные данные целей.")
+            goals = Change(float(totals["a"][0] or 0), float(totals["b"][0] or 0))
+        a, b = values["a"], values["b"]
+        return ReportData(
+            counter_name=str(connection["counter_name"] or counter_id),
+            current_period=current,
+            previous_period=previous,
+            visits=Change(a[0], b[0]),
+            users=Change(a[1], b[1]),
+            goals=goals,
+            goal_names=[goal_map[g] for g in selected],
+            goal_details=[
+                BreakdownChange(goal_map[g], a[i + 2], b[i + 2]) for i, g in enumerate(selected)
+            ],
+            sources=sources,
+            pages=[],
+            pages_loaded=False,
+            sampled=any(p.get("sampled") is True for p in payloads),
+            missing_goals=[g for g in goal_ids if g not in goal_map],
+            timezone_name=self.timezone_name,
+            data_delayed=any((p.get("data_lag") or 0) > 3600 for p in payloads),
+            source_ids=source_ids,
+            valid_goal_ids=selected,
+        )
+
     def add_pages(self, chat_id, counter_id, data):
         current, cur_complete = self._pages(chat_id, counter_id, data.current_period)
         previous, prev_complete = self._pages(chat_id, counter_id, data.previous_period)

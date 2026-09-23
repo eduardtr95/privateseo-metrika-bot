@@ -74,6 +74,8 @@ class BotService:
 
     def _setup_runtime(self):
         self.report_cache = ReportCache()
+        self.fetch_locks = {view: UserLocks() for view in MODES}
+        self.prefetch = KeyedQueue(1, 8, "bot-prepare")
         self.stop_event = threading.Event()
         self.locks = UserLocks()
         self.updates = KeyedQueue(4, 64, "bot-control")
@@ -484,6 +486,7 @@ class BotService:
                 return False
             today = today or datetime.now(ZoneInfo(self.config.report_timezone)).date()
             requested_view = view
+            from_context = context_id is not None
             view = view or (
                 "day"
                 if scheduled_key and days == 1
@@ -511,7 +514,7 @@ class BotService:
                 connection["chart_enabled"] = 1
             if requested_view and not scheduled_key:
                 self.db.set_display(chat_id, connection["generation"], view=requested_view)
-            if not scheduled_key:
+            if not scheduled_key and not from_context:
                 try:
                     self.telegram.send_chat_action(chat_id)
                 except TelegramAPIError:
@@ -542,6 +545,50 @@ class BotService:
                     )
             return accepted
 
+    def _calendar_data(self, chat_id, connection, today, view, detailed=False):
+        key = self.report_cache.key(chat_id, connection, today, view)
+        # Foreground and preparation of the same period share one fetch.
+        with self.fetch_locks[view].for_user(hash(key)):
+            data = self.report_cache.get(key)
+            if data is None:
+                data = collect_dashboard(
+                    self.reports,
+                    chat_id,
+                    connection,
+                    today,
+                    view,
+                    chart=False,
+                    include_pages=False,
+                    fast=True,
+                )
+            if detailed and not data.pages_loaded:
+                self.reports.add_pages(chat_id, int(connection["counter_id"]), data)
+            data.dashboard.chart_enabled = bool(not detailed and connection.get("chart_enabled", 1))
+            if data.dashboard.chart_enabled:
+                ensure_history(self.reports, chat_id, connection, data)
+            with self.locks.for_user(chat_id):
+                row = self.current_connection(chat_id, connection["generation"])
+                if self.stop_event.is_set() or not row or row["reauth_required"]:
+                    raise YandexAPIError("Подключение изменилось. Откройте новый отчёт.")
+                self.report_cache.put(key, data)
+            return data
+
+    def _prepare_views(self, chat_id, connection, today, shown_view):
+        for view in ("week", "month", "day"):
+            if view == shown_view:
+                continue
+            with self.locks.for_user(chat_id):
+                row = self.current_connection(chat_id, connection["generation"])
+                if self.stop_event.is_set() or not row or row["reauth_required"]:
+                    return
+            try:
+                with self.yandex.report_scope(chat_id, connection["generation"]):
+                    self._calendar_data(chat_id, connection, today, view)
+            except Exception as exc:
+                # Preparation never sends messages or holds the foreground queue.
+                log.info("Period preparation stopped (%s)", type(exc).__name__)
+                return
+
     def _run_report(
         self,
         chat_id,
@@ -561,34 +608,13 @@ class BotService:
                 return
         try:
             with self.yandex.report_scope(chat_id, generation):
-                cache_key = None
                 if view:
-                    cache_key = self.report_cache.key(chat_id, connection, today, view)
-                    data = self.report_cache.get(cache_key)
-                    if data is None:
-                        data = collect_dashboard(
-                            self.reports,
-                            chat_id,
-                            connection,
-                            today,
-                            view,
-                            chart=False,
-                            include_pages=False,
-                        )
-                    if detailed and not data.pages_loaded:
-                        self.reports.add_pages(chat_id, int(connection["counter_id"]), data)
-                    data.dashboard.chart_enabled = bool(
-                        not detailed and connection.get("chart_enabled", 1)
-                    )
-                    if data.dashboard.chart_enabled:
-                        ensure_history(self.reports, chat_id, connection, data)
+                    data = self._calendar_data(chat_id, connection, today, view, detailed)
                 else:
                     data = self.reports.collect(chat_id, connection, today=today, days=days)
             with self.locks.for_user(chat_id):
                 if self.stop_event.is_set() or not self.current_connection(chat_id, generation):
                     return
-                if cache_key:
-                    self.report_cache.put(cache_key, data)
                 if scheduled_key:
                     user = self.db.get_user(chat_id)
                     if (
@@ -640,6 +666,10 @@ class BotService:
                     "report_scheduled" if scheduled_key else "report_manual",
                     scheduled_key or str(connection["counter_id"]),
                 )
+                if view and not detailed:
+                    self.prefetch.submit(
+                        chat_id, lambda: self._prepare_views(chat_id, connection, today, view)
+                    )
         except Exception as exc:
             log.warning("Report failed (%s)", type(exc).__name__)
             with self.locks.for_user(chat_id):
@@ -1027,3 +1057,4 @@ class BotService:
         self.stop_event.set()
         self.updates.stop()
         self.jobs.stop()
+        self.prefetch.stop()
