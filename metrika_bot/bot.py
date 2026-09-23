@@ -13,7 +13,6 @@ from .analysis import (
     ReportBuilder,
     ReportData,
     format_compact_report,
-    format_compact_rich_report,
     format_report,
     format_rich_report,
     goal_relevance,
@@ -583,36 +582,40 @@ class BotService:
         detailed: bool = False,
         context_id: str | None = None,
     ) -> None:
-        buttons = (
-            [
-                [
-                    {
-                        "text": "Короткий отчёт" if detailed else "Показать детали",
-                        "callback_data": f"r:{context_id}:{'short' if detailed else 'full'}",
-                    }
-                ]
-            ]
-            if context_id
-            else []
-        )
-        if with_buttons:
-            buttons.extend(
-                [
-                    [
-                        {"text": "Цели", "callback_data": "goals"},
-                        {"text": "Расписание", "callback_data": "schedule"},
-                    ],
-                    [{"text": "Другой счётчик", "callback_data": "counters"}],
-                ]
+        row = []
+        if context_id:
+            row.append(
+                {
+                    "text": "Коротко" if detailed else "Подробнее",
+                    "callback_data": f"r:{context_id}:{'short' if detailed else 'full'}",
+                }
             )
-        rich_text = format_rich_report(data) if detailed else format_compact_rich_report(data)
+        if with_buttons:
+            row.append({"text": "Настройки", "callback_data": "settings"})
+        buttons = [row] if row else []
+        if not detailed:
+            self.telegram.send_message(chat_id, format_compact_report(data), buttons)
+            return
+        rich_text = format_rich_report(data)
         try:
             if len(rich_text.encode("utf-8")) > 32768:
                 raise TelegramAPIError("Rich text too large")
             self.telegram.send_rich_message(chat_id, rich_text, buttons)
         except TelegramAPIError:
-            text = format_report(data) if detailed else format_compact_report(data)
-            self.telegram.send_message(chat_id, text, buttons)
+            self.telegram.send_message(chat_id, format_report(data), buttons)
+
+    def send_settings(self, chat_id: int) -> None:
+        self.telegram.send_message(
+            chat_id,
+            "<b>Настройки отчётов</b>\nВыберите, что изменить:",
+            [
+                [
+                    {"text": "Цели", "callback_data": "goals"},
+                    {"text": "Расписание", "callback_data": "schedule"},
+                ],
+                [{"text": "Выбрать сайт", "callback_data": "counters"}],
+            ],
+        )
 
     def _handle_callback(self, callback: dict) -> None:
         callback_id = str(callback["id"])
@@ -642,6 +645,8 @@ class BotService:
             self.send_counters(chat_id)
         elif data == "goals":
             self.send_goals(chat_id)
+        elif data == "settings":
+            self.send_settings(chat_id)
         elif data == "schedule":
             self.send_schedule(chat_id)
         elif data.startswith("schedule:"):

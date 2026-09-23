@@ -193,7 +193,7 @@ def test_rich_report_uses_native_tables_and_links():
     assert len(text.encode()) <= 32768
 
 
-def test_compact_report_has_no_table_and_only_two_highlights():
+def test_compact_report_shows_all_sources_without_pages_or_repeated_advice():
     data = report(
         sources=[
             BreakdownChange("Переходы из поисковых систем", 75, 40),
@@ -208,11 +208,11 @@ def test_compact_report_has_no_table_and_only_two_highlights():
     fallback = format_compact_report(data)
 
     assert "<table" not in rich
-    assert "Визиты:</b> 80" in rich
-    assert "Целевые визиты:</b> 8" in rich
+    assert "Визиты: <b>80</b>" in rich
+    assert "Целевые визиты: <b>8</b>" in rich
     assert "Поиск" in rich
-    assert "Страница: lost" in rich
-    assert "Прямые заходы" not in rich
+    assert "Страница: lost" not in rich
+    assert "Прямые заходы" in rich
     assert "Страница: gained" not in rich
     assert len(fallback.splitlines()) <= 18
 
@@ -305,3 +305,34 @@ def test_report_labels_unique_visits_and_honors_all_selected_goals():
     assert "Один визит может достичь нескольких целей" in text
     assert "Не входят в итог" not in text
     assert "Переход в YouTube" in text
+
+
+def test_overview_keeps_stable_small_and_disappeared_sources():
+    text = format_compact_report(
+        report(
+            sources=[
+                BreakdownChange("Стабильный", 50, 50),
+                BreakdownChange("Исчезнувший", 0, 40),
+                BreakdownChange("Маленький", 4, 1),
+                BreakdownChange("Новый", 2, 0),
+                BreakdownChange("Пустой", 0, 0),
+                BreakdownChange("<unsafe>", 7, 8),
+            ],
+            goals=Change(0, 0),
+        )
+    )
+    assert "Стабильный: <b>50</b> · без изменений" in text
+    assert "Исчезнувший: <b>0</b> · −100%" in text
+    assert "Маленький: <b>4</b> · +3" in text
+    assert "Новый: <b>2</b> · +2" in text
+    assert "Пустой" not in text
+    assert "&lt;unsafe&gt;" in text
+    assert "Целевые визиты: <b>0</b> · без изменений" in text
+    assert "Что проверить" not in text
+
+
+def test_overview_retains_data_quality_warnings():
+    text = format_compact_report(report(sampled=True, missing_goals=[99], data_delayed=True))
+    assert "Выборочные данные" in text
+    assert "Некоторые цели недоступны" in text
+    assert "Метрика ещё обновляет данные" in text

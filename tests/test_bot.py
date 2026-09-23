@@ -150,6 +150,7 @@ def test_legacy_full_report_callback_requires_fresh_report(tmp_path: Path):
 
 class ReportTelegramStub(TelegramStub):
     def __init__(self):
+        super().__init__()
         self.rich_messages = []
 
     def send_rich_message(self, chat_id, text, buttons):
@@ -174,6 +175,28 @@ def test_default_report_is_compact_and_links_to_details():
 
     service._send_formatted_report(123, data, with_buttons=True, context_id="snapshot")
 
-    _, text, buttons = service.telegram.rich_messages[0]
+    (_, text, buttons), _ = service.telegram.messages[0]
+    assert service.telegram.rich_messages == []
     assert "<table" not in text
-    assert buttons[0][0] == {"text": "Показать детали", "callback_data": "r:snapshot:full"}
+    assert buttons[0][0] == {"text": "Подробнее", "callback_data": "r:snapshot:full"}
+    assert len(buttons) == 1
+    assert buttons[0][1] == {"text": "Настройки", "callback_data": "settings"}
+
+
+def test_settings_callback_opens_all_existing_controls(tmp_path):
+    service = object.__new__(BotService)
+    service.db = Database(tmp_path / "bot.sqlite3")
+    service.telegram = TelegramStub()
+    service._handle_callback(
+        {
+            "id": "settings-callback",
+            "message": {"chat": {"id": 123, "type": "private"}},
+            "data": "settings",
+        }
+    )
+    (_, _, buttons), _ = service.telegram.messages[-1]
+    assert {button["callback_data"] for row in buttons for button in row} == {
+        "goals",
+        "schedule",
+        "counters",
+    }

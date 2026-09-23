@@ -150,17 +150,18 @@ def test_pages_limit_excludes_unknown_but_keeps_verified_zero():
     result = compare_breakdowns({"both": 10}, {"both": 10, "unknown": 100}, current_complete=False)
     assert [(r.name, r.delta) for r in result] == [("both", 0)]
     assert compare_breakdowns({}, {"truly gone": 100})[0].delta == -100
-    assert "не означает ноль" in format_compact_report(sample(pages_partial=True))
+    assert "не означает ноль" in format_report(sample(pages_partial=True))
 
 
-def test_goal_warning_survives_compact_highlight_limit():
+def test_goal_drop_stays_visible_in_overview():
     text = format_compact_report(
         sample(
             sources=[BreakdownChange("Переходы из поисковых систем", 30, 80)],
             pages=[BreakdownChange("https://example.test/page", 5, 50)],
         )
     )
-    assert "Проверить формы" in text
+    assert "Целевые визиты:" in text
+    assert "Проверить формы" in format_report(sample())
 
 
 def test_deleted_selected_goal_is_reported_as_missing(service):

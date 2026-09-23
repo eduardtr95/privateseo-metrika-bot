@@ -570,118 +570,70 @@ def _rich_table(
     return "".join(rendered)
 
 
-def _compact_change(change: Change) -> str:
-    marker = "🟢" if change.absolute > 0 else "🔴" if change.absolute < 0 else "⚪️"
-    return f"{marker} {_signed(change.absolute)} ({_signed_percent(change.percent)})"
-
-
-def _compact_mover(item: BreakdownChange) -> str:
-    marker = "🟢" if item.delta > 0 else "🔴" if item.delta < 0 else "⚪️"
-    return f"{_number(item.current)} · {marker} {_signed(item.delta)} ({_breakdown_percent(item)})"
-
-
-def _compact_highlights(data: ReportData) -> list[tuple[str, BreakdownChange, str | None]]:
-    sources, page_losses, page_gains = _report_movers(data)
-    highlights: list[tuple[str, BreakdownChange, str | None]] = []
-    if sources:
-        highlights.append((source_name(sources[0].name), sources[0], None))
-    pages = page_losses or page_gains
-    if pages:
-        highlights.append((_page_label(pages[0].name), pages[0], pages[0].name))
-    return highlights
+def _compact_value(change: Change, small_base: int = 20) -> str:
+    """A single comparison, without dramatic percentages on tiny baselines."""
+    value = f"<b>{_number(change.current)}</b>"
+    if not change.absolute:
+        delta = "без изменений"
+    elif change.previous < small_base:
+        delta = _signed(change.absolute)
+    else:
+        delta = _signed_percent(change.percent)
+    return f"{value} · {delta}"
 
 
 def format_compact_rich_report(data: ReportData) -> str:
-    """Short owner-facing summary; the complete tables are available on demand."""
-    period_word, _, comparison = _period_word(data)
-    blocks = [
-        f"<h2>{html.escape(data.counter_name)}</h2>",
-        f"<p>{_period_text(data.current_period)} {comparison}</p>",
-        f"<h3>Итог за {period_word}</h3>",
-        (
-            f"<p><b>Визиты:</b> {_number(data.visits.current)} · "
-            f"{html.escape(_compact_change(data.visits))}"
-        ),
-    ]
-
-    selected_goals = data.goal_names
-    if data.goals and selected_goals:
-        blocks[-1] += (
-            f"<br><b>Целевые визиты:</b> {_number(data.goals.current)} · "
-            f"{html.escape(_compact_change(data.goals))}</p>"
-        )
-    else:
-        blocks[-1] += "</p>"
-        warning = (
-            "Не удалось получить данные выбранных целей. Проверьте /goals."
-            if data.goal_names
-            else "Бизнес-цели не выбраны."
-        )
-        blocks.append(f"<blockquote>⚠️ {html.escape(warning)}</blockquote>")
-
-    highlights = _compact_highlights(data)
-    if highlights:
-        items = []
-        for label, item, link in highlights:
-            safe_label = html.escape(label)
-            if link:
-                safe_label = f'<a href="{html.escape(link, quote=True)}">{safe_label}</a>'
-            items.append(f"<li><b>{safe_label}:</b> {html.escape(_compact_mover(item))}</li>")
-        blocks.extend(["<h3>Главное</h3>", f"<ul>{''.join(items)}</ul>"])
-
-    actions = insights(data)[:2]
-    if len(actions) == 1 and actions[0].startswith("Срочных действий нет"):
-        blocks.append(f"<blockquote>✅ {html.escape(actions[0])}</blockquote>")
-    else:
-        items = "".join(f"<li>{html.escape(note)}</li>" for note in actions)
-        blocks.extend(["<h3>Что проверить</h3>", f"<ol>{items}</ol>"])
-
-    if data.sampled:
-        blocks.append("<footer>Данные семплированы: небольшие изменения приблизительны.</footer>")
-    blocks.extend(f"<footer>{html.escape(note)}</footer>" for note in report_notes(data))
-    return "".join(blocks)
+    """Equivalent content for callers explicitly requesting rich HTML."""
+    return "<p>" + format_compact_report(data).replace("\n", "<br>") + "</p>"
 
 
 def format_compact_report(data: ReportData) -> str:
-    """HTML fallback for clients where Telegram rich messages are unavailable."""
-    period_word, _, comparison = _period_word(data)
+    """One-screen overview: totals and all active sources, without repeated advice."""
+    zone = "МСК" if data.timezone_name == "Europe/Moscow" else data.timezone_name
+
+    def dates(period: Period) -> str:
+        # Keep both exact windows visible without repeating the year twice.
+        year = data.current_period.end.year != data.previous_period.start.year
+        end = period.end.strftime("%d.%m.%Y" if year else "%d.%m")
+        if period.start == period.end:
+            return end
+        start = period.start.strftime("%d" if period.start.month == period.end.month else "%d.%m")
+        return f"{start}–{end}"
+
     lines = [
         f"<b>{html.escape(data.counter_name)}</b>",
-        f"{_period_text(data.current_period)} {comparison}",
+        f"{dates(data.current_period)} · к {dates(data.previous_period)} · {html.escape(zone)}",
         "",
-        f"<b>Итог за {period_word}</b>",
-        f"Визиты: {_number(data.visits.current)} · {_compact_change(data.visits)}",
+        f"Визиты: {_compact_value(data.visits)}",
+        f"Посетители: {_compact_value(data.users)}",
     ]
-
-    selected_goals = data.goal_names
-    if data.goals and selected_goals:
-        lines.append(
-            f"Целевые визиты: {_number(data.goals.current)} · {_compact_change(data.goals)}"
-        )
+    if data.goals is not None and data.goal_names:
+        lines.append(f"Целевые визиты: {_compact_value(data.goals, small_base=5)}")
     elif data.goal_names:
         lines.append("⚠️ Не удалось получить данные выбранных целей. Проверьте /goals.")
-    else:
-        lines.append("⚠️ Бизнес-цели не выбраны.")
+    elif not data.missing_goals:
+        lines.append("Цели не выбраны → /goals")
 
-    highlights = _compact_highlights(data)
-    if highlights:
-        lines.extend(["", "<b>Главное</b>"])
-        for label, item, link in highlights:
-            safe_label = html.escape(label)
-            if link:
-                safe_label = f'<a href="{html.escape(link, quote=True)}">{safe_label}</a>'
-            lines.append(f"{safe_label}: {_compact_mover(item)}")
-
-    actions = insights(data)[:2]
-    lines.append("")
-    if len(actions) == 1 and actions[0].startswith("Срочных действий нет"):
-        lines.append(f"✅ {html.escape(actions[0])}")
+    sources = sorted(data.sources, key=lambda item: (-item.current, -item.previous, item.name))
+    sources = [item for item in sources if item.current or item.previous]
+    if sources:
+        lines.extend(["", "<b>Источники · визиты</b>"])
+        for item in sources:
+            label = source_name(item.name)
+            lines.append(
+                f"{html.escape(label)}: {_compact_value(Change(item.current, item.previous))}"
+            )
     else:
-        lines.append("<b>Что проверить</b>")
-        lines.extend(f"{index}. {html.escape(note)}" for index, note in enumerate(actions, start=1))
+        lines.extend(["", "По источникам визитов нет."])
+
+    warnings = []
     if data.sampled:
-        lines.extend(["", "<i>Данные семплированы: небольшие изменения приблизительны.</i>"])
-    lines.extend(["", *[html.escape(note) for note in report_notes(data)]])
+        warnings.append("⚠️ Выборочные данные: изменения приблизительны.")
+    if data.missing_goals:
+        warnings.append("⚠️ Некоторые цели недоступны → /goals")
+    if data.data_delayed:
+        warnings.append("⚠️ Метрика ещё обновляет данные.")
+    lines.extend(["", *warnings, "<i>Без распознанных роботов. Подробности — по кнопке.</i>"])
     return fit_html("\n".join(lines))
 
 
