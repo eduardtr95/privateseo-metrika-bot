@@ -245,7 +245,7 @@ class YandexClient:
             headers={
                 "Authorization": "OAuth " + access,
                 "Accept": "application/json",
-                "User-Agent": "PrivateSEO-Metrika-Bot/0.2",
+                "User-Agent": "PrivateSEO-Metrika-Bot/0.3",
             },
         )
         for attempt in range(3):

@@ -17,6 +17,9 @@ from .analysis import (
     format_rich_report,
     goal_relevance,
 )
+from .dashboard import MODES, SOURCE_LABELS, collect_dashboard, dashboard_text, source_selection
+from .dashboard import dashboard_details
+from .charts import render_chart
 from .config import Config
 from .runtime import KeyedQueue, UserLocks
 from .db import Database
@@ -213,8 +216,10 @@ class BotService:
                     payload = "direct"
                 self.db.record_first_start(chat_id, payload)
             self._welcome(chat_id, force_connect=command == "/connect")
-        elif command == "/week":
-            self.send_report(chat_id)
+        elif command in {"/day", "/week", "/month"}:
+            self.send_report(chat_id, view=command[1:])
+        elif command == "/sources":
+            self.send_sources(chat_id)
         elif command == "/counters":
             self.send_counters(chat_id)
         elif command == "/goals":
@@ -247,7 +252,7 @@ class BotService:
         elif command == "/privacy":
             self.telegram.send_message(
                 chat_id,
-                "<b>Приватность</b>\n\nБот хранит Telegram ID и username, источник первого запуска, выбранный счётчик и цели, расписание, зашифрованные токены и технические события. Параметры кнопок отчётов хранятся до 30 дней, события — до 90 дней. Сырые выгрузки и тексты отчётов не сохраняются. /disconnect удаляет доступ и ожидающие подключения, /delete_me — данные из рабочей базы. Резервные копии удаляются в течение 14 дней.",
+                "<b>Приватность</b>\n\nБот хранит Telegram ID и username, источник первого запуска, выбранный счётчик, цели, источники и вид отчёта, расписание, зашифрованные токены и технические события. Параметры кнопок отчётов хранятся до 30 дней, события — до 90 дней. Сырые выгрузки и тексты отчётов не сохраняются. /disconnect удаляет доступ и ожидающие подключения, /delete_me — данные из рабочей базы. Резервные копии удаляются в течение 14 дней.",
             )
         elif command == "/feedback":
             self._feedback(chat_id)
@@ -263,7 +268,7 @@ class BotService:
                 chat_id,
                 "<b>PrivateSEO Аналитика</b>\n\nМетрика подключена. Я показываю не просто цифры, а существенные изменения: где просел трафик, на каких страницах вырос трафик и что проверить.\n\nЕжедневное или недельное расписание настраивается под вас.",
                 [
-                    [{"text": "Показать неделю", "callback_data": "week"}],
+                    [{"text": "Открыть отчёт", "callback_data": "week"}],
                     [{"text": "Настроить расписание", "callback_data": "schedule"}],
                     [{"text": "Выбрать счётчик", "callback_data": "counters"}],
                 ],
@@ -279,7 +284,7 @@ class BotService:
     def _help(self, chat_id: int) -> None:
         self.telegram.send_message(
             chat_id,
-            '<b>Как пользоваться</b>\n\n/week — отчёт за 7 полных дней\n/connect — подключить или обновить доступ\n/counters — выбрать сайт\n/goals — выбрать заявки и продажи\n/schedule — дни и время отчётов\n/pause — выключить автодайджест\n/resume — включить обратно\n/disconnect — удалить доступ к Метрике\n/privacy — какие данные хранятся\n/delete_me — удалить свои данные\n/feedback — вопросы и предложения\n\n<b>Обратная связь</b>\nНашли ошибку, чего-то не хватает или есть идея? Напишите Эдуарду: <a href="https://t.me/eduardtr95">@eduardtr95</a>.\n\n<b>Другие продукты PrivateSEO</b>\n'
+            '<b>Как пользоваться</b>\n\n/day — вчера к позавчера\n/week — текущая неделя по вчера\n/month — текущий месяц по вчера\n/sources — источники и график\n/connect — подключить или обновить доступ\n/counters — выбрать сайт\n/goals — выбрать заявки и продажи\n/schedule — дни и время отчётов\n/pause — выключить автодайджест\n/resume — включить обратно\n/disconnect — удалить доступ к Метрике\n/privacy — какие данные хранятся\n/delete_me — удалить свои данные\n/feedback — вопросы и предложения\n\n<b>Обратная связь</b>\nНашли ошибку, чего-то не хватает или есть идея? Напишите Эдуарду: <a href="https://t.me/eduardtr95">@eduardtr95</a>.\n\n<b>Другие продукты PrivateSEO</b>\n'
             '🌐 <a href="https://private-seo.ru/?utm_source=telegram&amp;utm_medium=bot&amp;utm_campaign=metrika_bot&amp;utm_content=help">Сайт SEO- и GEO-агентства</a>\n'
             '🧩 <a href="https://chromewebstore.google.com/detail/privateseo-ai-auditor-seo/nblbceehggefmhkioijdbppdboimoicg">PrivateSEO AI Auditor для Chrome</a>\n'
             "🟢 Следить за падениями, SSL, noindex и robots.txt: "
@@ -310,7 +315,7 @@ class BotService:
             "<b>Расписание отчётов</b>\n\n"
             f"Сейчас: <b>{current}</b>\n"
             "Ежедневный отчёт сравнивает вчера с позавчера. "
-            "Еженедельный — последние 7 полных дней с предыдущими 7."
+            "Недельный — текущую неделю по вчера с теми же днями прошлой; по понедельникам — две полные недели."
         )
         buttons = [
             [
@@ -456,6 +461,9 @@ class BotService:
         days: int = 7,
         today: date | None = None,
         scheduled_key: str | None = None,
+        view: str | None = None,
+        edit_message_id: int | None = None,
+        edit_has_photo: bool = False,
     ) -> bool:
         with self.locks.for_user(chat_id):
             row = self.db.get_connection(chat_id)
@@ -468,6 +476,16 @@ class BotService:
                 self.send_counters(chat_id)
                 return False
             today = today or datetime.now(ZoneInfo(self.config.report_timezone)).date()
+            requested_view = view
+            view = view or (
+                "day"
+                if scheduled_key and days == 1
+                else "week"
+                if scheduled_key
+                else connection.get("report_view", "week")
+            )
+            if view not in MODES:
+                return False
             if context_id:
                 context = self.db.report_context(chat_id, context_id)
                 if not context or context["generation"] != connection["generation"]:
@@ -479,6 +497,11 @@ class BotService:
                 params = json.loads(context["payload"])
                 connection.update(params["connection"])
                 today, days = date.fromisoformat(params["today"]), int(params["days"])
+                view = requested_view or params.get("view")
+                if requested_view and requested_view != params.get("view"):
+                    context_id = None
+            if requested_view and not scheduled_key:
+                self.db.set_display(chat_id, connection["generation"], view=requested_view)
             if not scheduled_key:
                 try:
                     self.telegram.send_chat_action(chat_id)
@@ -487,7 +510,16 @@ class BotService:
 
             def work():
                 self._run_report(
-                    chat_id, connection, today, days, detailed, scheduled_key, context_id
+                    chat_id,
+                    connection,
+                    today,
+                    days,
+                    detailed,
+                    scheduled_key,
+                    context_id,
+                    view,
+                    edit_message_id,
+                    edit_has_photo,
                 )
 
             accepted = self.jobs.submit(chat_id, work)
@@ -501,14 +533,32 @@ class BotService:
                     )
             return accepted
 
-    def _run_report(self, chat_id, connection, today, days, detailed, scheduled_key, context_id):
+    def _run_report(
+        self,
+        chat_id,
+        connection,
+        today,
+        days,
+        detailed,
+        scheduled_key,
+        context_id,
+        view=None,
+        edit_message_id=None,
+        edit_has_photo=False,
+    ):
         generation = connection["generation"]
         with self.locks.for_user(chat_id):
             if self.stop_event.is_set() or not self.current_connection(chat_id, generation):
                 return
         try:
             with self.yandex.report_scope(chat_id, generation):
-                data = self.reports.collect(chat_id, connection, today=today, days=days)
+                data = (
+                    collect_dashboard(
+                        self.reports, chat_id, connection, today, view, chart=not detailed
+                    )
+                    if view
+                    else self.reports.collect(chat_id, connection, today=today, days=days)
+                )
             with self.locks.for_user(chat_id):
                 if self.stop_event.is_set() or not self.current_connection(chat_id, generation):
                     return
@@ -530,14 +580,29 @@ class BotService:
                         {
                             "connection": {
                                 key: connection[key]
-                                for key in ("counter_id", "counter_name", "goal_ids")
+                                for key in (
+                                    "counter_id",
+                                    "counter_name",
+                                    "goal_ids",
+                                    "visible_sources",
+                                    "chart_enabled",
+                                    "report_view",
+                                )
+                                if key in connection
                             },
                             "today": today.isoformat(),
                             "days": days,
+                            "view": view,
                         },
                     )
                 self._send_formatted_report(
-                    chat_id, data, with_buttons=True, detailed=detailed, context_id=context_id
+                    chat_id,
+                    data,
+                    with_buttons=True,
+                    detailed=detailed,
+                    context_id=context_id,
+                    edit_message_id=edit_message_id,
+                    edit_has_photo=edit_has_photo,
                 )
                 if scheduled_key:
                     self.db.mark_report_sent(chat_id, scheduled_key)
@@ -581,7 +646,12 @@ class BotService:
         with_buttons: bool = False,
         detailed: bool = False,
         context_id: str | None = None,
+        edit_message_id: int | None = None,
+        edit_has_photo: bool = False,
     ) -> None:
+        if data.dashboard and not detailed:
+            self._send_dashboard(chat_id, data, context_id, edit_message_id, edit_has_photo)
+            return
         row = []
         if context_id:
             row.append(
@@ -596,6 +666,9 @@ class BotService:
         if not detailed:
             self.telegram.send_message(chat_id, format_compact_report(data), buttons)
             return
+        if data.dashboard:
+            self.telegram.send_message(chat_id, dashboard_details(data), buttons)
+            return
         rich_text = format_rich_report(data)
         try:
             if len(rich_text.encode("utf-8")) > 32768:
@@ -604,11 +677,99 @@ class BotService:
         except TelegramAPIError:
             self.telegram.send_message(chat_id, format_report(data), buttons)
 
+    def _send_dashboard(self, chat_id, data, context_id, message_id=None, has_photo=False):
+        from html.parser import HTMLParser
+
+        class Visible(HTMLParser):
+            def __init__(self, text):
+                super().__init__(convert_charrefs=True)
+                self.text = ""
+                self.feed(text)
+
+            def handle_data(self, value):
+                self.text += value
+
+        buttons = [
+            [
+                {
+                    "text": ("✓ " if data.dashboard.mode == mode else "") + label,
+                    "callback_data": f"v:{context_id}:{mode}",
+                }
+                for mode, label in MODES.items()
+            ],
+            [
+                {"text": "Подробнее", "callback_data": f"r:{context_id}:full"},
+                {"text": "Что показывать", "callback_data": "sources"},
+            ],
+        ]
+        text = dashboard_text(data)
+        for limit in (3, 2, 1, 0):
+            text = dashboard_text(data, goal_limit=limit)
+            if len(Visible(text).text.encode("utf-16-le")) // 2 <= 1024:
+                break
+        caption_fits = len(Visible(text).text.encode("utf-16-le")) // 2 <= 1024
+        try:
+            png = render_chart(data) if caption_fits else None
+        except Exception:
+            log.warning("Chart rendering failed; sending text")
+            data.dashboard.chart_warning = "График временно недоступен; цифры отчёта получены."
+            text = dashboard_text(data, goal_limit=0)
+            png = None
+        if png:
+            try:
+                self.telegram.send_chart(chat_id, png, text, buttons, message_id)
+                return
+            except TelegramAPIError:
+                log.warning("Chart delivery failed; sending text")
+        if message_id and not has_photo:
+            self.telegram.edit_message_text(chat_id, message_id, text, buttons)
+        else:
+            self.telegram.send_message(chat_id, dashboard_text(data), buttons)
+
+    def send_sources(self, chat_id, message_id=None):
+        connection = self.db.get_connection(chat_id)
+        if not connection or not connection["counter_id"]:
+            self.send_counters(chat_id)
+            return
+        selected = source_selection(connection)
+        gen = connection["generation"]
+        cells = [
+            {
+                "text": ("✓ " if selected is None or key in selected else "▫️ ") + label,
+                "callback_data": f"src:{gen}:{key}",
+            }
+            for key, label in SOURCE_LABELS.items()
+        ]
+        buttons = [cells[i : i + 2] for i in range(0, len(cells), 2)]
+        buttons += [
+            [
+                {"text": "Все", "callback_data": f"src:{gen}:all"},
+                {"text": "Снять всё", "callback_data": f"src:{gen}:none"},
+            ],
+            [
+                {
+                    "text": ("✓ " if connection["chart_enabled"] else "▫️ ") + "Показывать график",
+                    "callback_data": f"src:{gen}:chart",
+                }
+            ],
+            [
+                {"text": "Выбрать цели", "callback_data": "goals"},
+                {"text": "Расписание", "callback_data": "schedule"},
+            ],
+            [{"text": "Готово — отчёт", "callback_data": f"ready:{gen}"}],
+        ]
+        text = "<b>Что показывать</b>\nОтметьте источники для списка и графика. Выбор сохраняется.\nИтоги посещаемости и выбранные цели относятся ко всему сайту."
+        if message_id is None:
+            self.telegram.send_message(chat_id, text, buttons)
+        else:
+            self.telegram.edit_message_text(chat_id, message_id, text, buttons)
+
     def send_settings(self, chat_id: int) -> None:
         self.telegram.send_message(
             chat_id,
             "<b>Настройки отчётов</b>\nВыберите, что изменить:",
             [
+                [{"text": "Что показывать", "callback_data": "sources"}],
                 [
                     {"text": "Цели", "callback_data": "goals"},
                     {"text": "Расписание", "callback_data": "schedule"},
@@ -637,6 +798,37 @@ class BotService:
         self.telegram.answer_callback(callback_id)
         if data == "week":
             self.send_report(chat_id)
+        elif data == "sources":
+            self.send_sources(chat_id)
+        elif data.startswith("v:"):
+            parts = data.split(":")
+            if len(parts) == 3 and parts[2] in MODES:
+                self.send_report(
+                    chat_id,
+                    context_id=parts[1],
+                    view=parts[2],
+                    edit_message_id=int(callback["message"]["message_id"]),
+                    edit_has_photo=bool(callback["message"].get("photo")),
+                )
+        elif data.startswith("src:"):
+            parts = data.split(":")
+            connection = self.db.get_connection(chat_id)
+            if len(parts) != 3 or not connection or connection["generation"] != parts[1]:
+                self.telegram.send_message(chat_id, "Эти настройки устарели. Откройте /sources.")
+                return
+            key = parts[2]
+            if key == "chart":
+                self.db.set_display(chat_id, parts[1], chart=not connection["chart_enabled"])
+            elif key == "all":
+                self.db.set_display(chat_id, parts[1], all_sources=True)
+            elif key == "none":
+                self.db.set_display(chat_id, parts[1], sources=[])
+            elif key in SOURCE_LABELS:
+                selected = source_selection(connection)
+                selected = set(SOURCE_LABELS if selected is None else selected)
+                selected.symmetric_difference_update({key})
+                self.db.set_display(chat_id, parts[1], sources=list(selected))
+            self.send_sources(chat_id, int(callback["message"]["message_id"]))
         elif data.startswith("r:"):
             parts = data.split(":")
             if len(parts) == 3 and parts[2] in {"short", "full"}:

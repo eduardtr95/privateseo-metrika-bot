@@ -90,6 +90,77 @@ class TelegramAPI:
             payload["reply_markup"] = {"inline_keyboard": buttons}
         self.call("sendRichMessage", payload)
 
+    def send_chart(self, chat_id, png, text, buttons, message_id=None):
+        """Upload an in-memory chart, or replace the existing report in place."""
+        caption = {"caption": text, "parse_mode": "HTML"}
+        payload = {"chat_id": chat_id, "reply_markup": {"inline_keyboard": buttons}}
+        if message_id is None:
+            method = "sendPhoto"
+            payload.update(photo="attach://chart", **caption)
+        else:
+            method = "editMessageMedia"
+            payload.update(
+                message_id=message_id, media={"type": "photo", "media": "attach://chart", **caption}
+            )
+        return self._upload_chart(method, payload, png)
+
+    def _upload_chart(self, method, payload, png):
+        boundary = "----MetrikaChart" + secrets.token_hex(12)
+        parts = []
+        for key, value in payload.items():
+            if isinstance(value, (dict, list)):
+                value = json.dumps(value, ensure_ascii=False)
+            parts.append(
+                f'--{boundary}\r\nContent-Disposition: form-data; name="{key}"\r\n\r\n{value}\r\n'.encode()
+            )
+        parts.extend(
+            [
+                f'--{boundary}\r\nContent-Disposition: form-data; name="chart"; filename="chart.png"\r\nContent-Type: image/png\r\n\r\n'.encode(),
+                png,
+                f"\r\n--{boundary}--\r\n".encode(),
+            ]
+        )
+        request = urllib.request.Request(
+            self.base_url + method,
+            data=b"".join(parts),
+            headers={"Content-Type": f"multipart/form-data; boundary={boundary}"},
+            method="POST",
+        )
+        try:
+            with urllib.request.urlopen(request, timeout=30) as response:
+                body = json.loads(response.read().decode())
+        except urllib.error.HTTPError as exc:
+            try:
+                description = json.loads(exc.read().decode()).get(
+                    "description", "Chart delivery failed"
+                )
+            except (ValueError, UnicodeDecodeError):
+                description = "Chart delivery failed"
+            if "message is not modified" in description.lower():
+                return True
+            raise TelegramAPIError(description) from None
+        except (urllib.error.URLError, TimeoutError, ValueError):
+            raise TelegramAPIError("Chart delivery unavailable") from None
+        if not body.get("ok"):
+            raise TelegramAPIError(str(body.get("description") or "Chart delivery failed"))
+        return body.get("result")
+
+    def edit_chart_caption(self, chat_id, message_id, text, buttons):
+        try:
+            return self.call(
+                "editMessageCaption",
+                {
+                    "chat_id": chat_id,
+                    "message_id": message_id,
+                    "caption": text,
+                    "parse_mode": "HTML",
+                    "reply_markup": {"inline_keyboard": buttons},
+                },
+            )
+        except TelegramAPIError as exc:
+            if "message is not modified" not in str(exc).lower():
+                raise
+
     def edit_message_reply_markup(
         self,
         chat_id: int,
@@ -206,7 +277,10 @@ class TelegramAPI:
             {"command": "disconnect", "description": "Удалить доступ к Метрике"},
             {"command": "delete_me", "description": "Удалить свои данные"},
             {"command": "privacy", "description": "Как хранятся данные"},
-            {"command": "week", "description": "Отчёт за последние 7 дней"},
+            {"command": "day", "description": "Вчера по сравнению с позавчера"},
+            {"command": "week", "description": "Текущая неделя по вчерашний день"},
+            {"command": "month", "description": "Текущий месяц по вчерашний день"},
+            {"command": "sources", "description": "Что показывать в отчёте и на графике"},
             {"command": "counters", "description": "Выбрать счётчик"},
             {"command": "goals", "description": "Выбрать цели и заявки"},
             {"command": "schedule", "description": "Настроить расписание"},

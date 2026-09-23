@@ -4,13 +4,13 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "privateseo-metrika-bot"
-version = "0.2.0"
+version = "0.3.0"
 description = "Open-source Telegram analyst for Yandex Metrica"
 readme = "README.md"
 requires-python = ">=3.11"
 license = { text = "MIT" }
 authors = [{ name = "Eduard Trubcheninov" }]
-dependencies = ["cryptography>=48.0.1,<49"]
+dependencies = ["cryptography>=48.0.1,<49", "Pillow>=12.1.1,<13"]
 
 [project.optional-dependencies]
 dev = ["pytest>=8,<10", "ruff==0.15.22"]

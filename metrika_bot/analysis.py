@@ -77,6 +77,9 @@ class ReportData:
     missing_goals: list[int] = field(default_factory=list)
     timezone_name: str = "Europe/Moscow"
     data_delayed: bool = False
+    source_ids: dict[str, str] = field(default_factory=dict)
+    valid_goal_ids: list[int] = field(default_factory=list)
+    dashboard: Any = None
 
 
 def completed_weeks(today: date | None = None) -> tuple[Period, Period]:
@@ -167,6 +170,7 @@ class ReportBuilder:
         connection: Any,
         today: date | None = None,
         days: int = 7,
+        periods: tuple[Period, Period] | None = None,
     ) -> ReportData:
         counter_id = int(connection["counter_id"])
         goal_ids = [int(value) for value in json.loads(connection["goal_ids"] or "[]")]
@@ -174,7 +178,7 @@ class ReportBuilder:
         goal_map = {int(goal["id"]): str(goal.get("name") or goal["id"]) for goal in goals}
         selected = [goal_id for goal_id in goal_ids if goal_id in goal_map][:15]
         today = today or datetime.now(ZoneInfo(self.timezone_name)).date()
-        current, previous = completed_periods(days, today)
+        current, previous = periods or completed_periods(days, today)
 
         cur_total = self.yandex.report(
             chat_id,
@@ -308,6 +312,15 @@ class ReportBuilder:
             timezone_name=self.timezone_name,
             data_delayed=any((p.get("data_lag") or 0) > 3600 for p in (cur_total, prev_total)),
             sampled=sampled,
+            source_ids={
+                str(row["dimensions"][0].get("name") or row["dimensions"][0].get("id")): str(
+                    row["dimensions"][0].get("id")
+                )
+                for payload in (cur_sources, prev_sources)
+                for row in payload.get("data", [])
+                if row.get("dimensions")
+            },
+            valid_goal_ids=selected,
         )
 
 
@@ -432,11 +445,13 @@ def _meaningful(change: Change, min_previous: float, percent: float, absolute: f
 
 
 def insights(data: ReportData) -> list[str]:
+    from .dashboard import visible_sources
+
     notes: list[str] = []
     source_losses = sorted(
         (
             item
-            for item in data.sources
+            for item in visible_sources(data)
             if item.name not in SERVICE_SOURCES and item.delta < 0 and _important_source(item)
         ),
         key=lambda item: item.delta,
@@ -502,6 +517,15 @@ def _summary(data: ReportData) -> list[str]:
 
 
 def _period_word(data: ReportData) -> tuple[str, str, str]:
+    if data.dashboard:
+        from .dashboard import human_period
+
+        label = {"day": "день", "week": "неделю", "month": "месяц"}[data.dashboard.mode]
+        return (
+            label,
+            data.dashboard.title,
+            f"— сравнение: {human_period(data.previous_period, True)}",
+        )
     days = (data.current_period.end - data.current_period.start).days + 1
     if days == 1:
         return "день", "Итог дня", "против предыдущего дня"
@@ -517,7 +541,9 @@ def _period_text(period: Period) -> str:
 def _report_movers(
     data: ReportData,
 ) -> tuple[list[BreakdownChange], list[BreakdownChange], list[BreakdownChange]]:
-    sources = sorted(data.sources, key=lambda item: abs(item.delta), reverse=True)
+    from .dashboard import visible_sources
+
+    sources = sorted(visible_sources(data), key=lambda item: abs(item.delta), reverse=True)
     sources = [
         item for item in sources if item.name not in SERVICE_SOURCES and abs(item.delta) >= 3
     ][:4]

@@ -56,3 +56,28 @@ def test_chat_action_uses_typing_by_default(monkeypatch):
 
     assert captured["method"] == "sendChatAction"
     assert captured["payload"] == {"chat_id": 123, "action": "typing"}
+
+
+def test_chart_upload_and_period_edit_use_the_same_message(monkeypatch):
+    import io
+    import json
+    import urllib.request
+
+    requests = []
+
+    def open_request(request, timeout):
+        requests.append(request)
+        return io.BytesIO(json.dumps({"ok": True, "result": {"message_id": 77}}).encode())
+
+    monkeypatch.setattr(urllib.request, "urlopen", open_request)
+    api = TelegramAPI("test-token")
+    api.send_chart(
+        123, b"png-data", "<b>Сентябрь</b>", [[{"text": "День", "callback_data": "v:ctx:day"}]]
+    )
+    api.send_chart(123, b"new-png", "<b>Вчера</b>", [], message_id=77)
+    assert requests[0].full_url.endswith("sendPhoto")
+    assert requests[1].full_url.endswith("editMessageMedia")
+    body = requests[1].data.decode()
+    assert 'name="message_id"\r\n\r\n77' in body
+    assert '"media": "attach://chart"' in body
+    assert "new-png" in body and "Вчера" in body

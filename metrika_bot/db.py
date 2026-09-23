@@ -90,6 +90,9 @@ class Database:
                 "connections": {
                     "generation": "TEXT",
                     "reauth_required": "INTEGER NOT NULL DEFAULT 0",
+                    "visible_sources": "TEXT",
+                    "chart_enabled": "INTEGER NOT NULL DEFAULT 1",
+                    "report_view": "TEXT NOT NULL DEFAULT 'week'",
                 },
                 "oauth_states": {"user_epoch": "TEXT"},
             }.items():
@@ -231,6 +234,36 @@ class Database:
                 "UPDATE connections SET counter_id = ?, counter_name = ?, goal_ids = '[]', generation = ?, reauth_required = 0 WHERE chat_id = ?",
                 (counter_id, name, secrets.token_hex(8), chat_id),
             )
+
+    def set_display(
+        self, chat_id, generation, *, sources=None, all_sources=False, chart=None, view=None
+    ):
+        from .dashboard import SOURCE_LABELS, MODES
+
+        fields, values = [], []
+        if all_sources:
+            fields.append("visible_sources = NULL")
+        elif sources is not None:
+            if any(key not in SOURCE_LABELS for key in sources):
+                raise ValueError("Invalid source")
+            fields.append("visible_sources = ?")
+            values.append(json.dumps(sorted(set(sources))))
+        if chart is not None:
+            fields.append("chart_enabled = ?")
+            values.append(int(bool(chart)))
+        if view is not None:
+            if view not in MODES:
+                raise ValueError("Invalid view")
+            fields.append("report_view = ?")
+            values.append(view)
+        if not fields:
+            return False
+        with self.connect() as conn:
+            cursor = conn.execute(
+                f"UPDATE connections SET {', '.join(fields)} WHERE chat_id = ? AND generation = ?",
+                (*values, chat_id, generation),
+            )
+            return bool(cursor.rowcount)
 
     def set_goals(self, chat_id: int, goal_ids: list[int]) -> None:
         with self.connect() as conn:

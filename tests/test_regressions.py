@@ -465,3 +465,58 @@ def test_database_migration_preserves_existing_connection_and_is_idempotent(tmp_
     assert db.get_connection(123)["access_token"] == "encrypted"
     assert db.get_user(123)["report_enabled"] == 0
     assert db.get_user(123)["last_report_key"] == "W-2026-32"
+
+
+def test_calendar_snapshot_preserves_sources_goals_and_anchor_on_period_switch(service):
+    row = dict(service.db.get_connection(123))
+    service.db.set_display(123, row["generation"], sources=["organic"], chart=False)
+    row = dict(service.db.get_connection(123))
+    ctx = service.db.save_report_context(
+        123,
+        row["generation"],
+        {
+            "today": "2026-09-23",
+            "days": 7,
+            "view": "week",
+            "connection": {
+                k: row[k]
+                for k in (
+                    "counter_id",
+                    "counter_name",
+                    "goal_ids",
+                    "visible_sources",
+                    "chart_enabled",
+                )
+            },
+        },
+    )
+    service.db.set_display(123, row["generation"], sources=["social"])
+    service.db.set_goals(123, [22])
+    service.reports.collect = Mock(return_value=sample(source_ids={}))
+    assert service.send_report(123, context_id=ctx, view="month", edit_message_id=77)
+    service.jobs.executor.shutdown(wait=True)
+    call = service.reports.collect.call_args
+    assert call.args[1]["goal_ids"] == "[11]"
+    assert json.loads(call.args[1]["visible_sources"]) == ["organic"]
+    assert call.kwargs["today"] == date(2026, 9, 23)
+    assert call.kwargs["periods"] == (
+        Period(date(2026, 9, 1), date(2026, 9, 22)),
+        Period(date(2026, 8, 1), date(2026, 8, 22)),
+    )
+    assert service.db.get_connection(123)["report_view"] == "month"
+    assert service.db.get_connection(123)["visible_sources"] == '["social"]'
+    assert service.telegram.edit_message_text.call_args.args[1] == 77
+    service.telegram.send_message.assert_not_called()
+
+
+def test_source_toggle_and_goal_selection_preserve_each_other(service):
+    generation = service.db.get_connection(123)["generation"]
+    service.handle_update(callback(f"src:{generation}:social"))
+    row = service.db.get_connection(123)
+    assert "social" not in json.loads(row["visible_sources"])
+    assert "organic" in json.loads(row["visible_sources"])
+    assert row["goal_ids"] == "[11]"
+    service.handle_update(callback(f"src:{generation}:none"))
+    assert service.db.get_connection(123)["visible_sources"] == "[]"
+    service.handle_update(callback(f"src:{generation}:all"))
+    assert service.db.get_connection(123)["visible_sources"] is None

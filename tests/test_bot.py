@@ -199,4 +199,5 @@ def test_settings_callback_opens_all_existing_controls(tmp_path):
         "goals",
         "schedule",
         "counters",
+        "sources",
     }
