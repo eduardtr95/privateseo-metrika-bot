@@ -1,0 +1,26 @@
+#!/bin/bash
+# Проверка перед коммитом: изменил код — обнови документацию в том же коммите.
+# Ставится в репо как .githooks/pre-commit + `git config core.hooksPath .githooks`.
+# Обход для правок, не меняющих устойчивых фактов (опечатка, стиль): DOCS_OK=1 git commit …
+set -u
+[ "${DOCS_OK:-0}" = 1 ] && exit 0
+
+staged=$(git diff --cached --name-only --diff-filter=ACMR)
+[ -z "$staged" ] && exit 0
+
+docs_re='^(docs/|README\.md$|AGENTS\.md$|CLAUDE\.md$|CHANGELOG\.md$|CONTEXT\.md$|GROWTH\.md$|IDEAS\.md$|STORE_RELEASE_NOTES\.md$|\.env\.example$)'
+code_re='\.(js|jsx|mjs|cjs|ts|tsx|py|css|html|sql|sh|toml|ya?ml)$'
+skip_re='^(test/|tests/|prototypes/|scripts/|\.githooks/|store-assets/|releases/)|package-lock\.json$'
+
+code=$(echo "$staged" | grep -Ev "$skip_re" | grep -E "$code_re" || true)
+docs=$(echo "$staged" | grep -E "$docs_re" || true)
+
+if [ -n "$code" ] && [ -z "$docs" ]; then
+  echo "✗ Код изменён, документация нет. Правка кода и документации — один коммит (правило из AGENTS.md)."
+  echo "  Изменённый код:"
+  echo "$code" | sed 's/^/    /'
+  echo "  Обнови docs/ или README.md/AGENTS.md (для бота — CONTEXT.md, для плагина — CHANGELOG.md) и добавь в коммит."
+  echo "  Если правка не меняет устойчивых фактов (опечатка, стиль): DOCS_OK=1 git commit …"
+  exit 1
+fi
+exit 0
